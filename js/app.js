@@ -74,6 +74,7 @@
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h2M14 13h2M8 17h2M14 17h2"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',
+    chevronLeft: '<path d="m15 18-6-6 6-6"/>',
     chevronDown: '<path d="m6 9 6 6 6-6"/>',
   };
   const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -221,6 +222,10 @@
   const huePick = (action, id, cur) => `<div class="hue-pick">${(HUES.includes(cur) ? HUES : [cur, ...HUES]).map((h) =>
     `<button class="vc ${h === cur ? "on" : ""}" style="--vh:${h}" data-action="${action}" data-id="${id}" data-h="${h}" aria-label="Выбрать этот цвет"></button>`).join("")}</div>`;
   const HUES = [...PALETTE].sort((a, b) => a - b);
+  // свой цвет клетки дня (оттенок палитры или "gray"), рисуется поверх цвета строки
+  const tint = (x) => (x && x.color != null
+    ? { cls: `vc tint${x.color === "gray" ? " gray" : ""}`, style: x.color === "gray" ? "" : `style="--vh:${x.color}"` }
+    : { cls: "", style: "" });
   // новой заявке — цвет, который реже всего встречается у групп в те же даты
   function freshHue(from, to) {
     const used = new Map(PALETTE.map((h) => [h, 0]));
@@ -314,6 +319,11 @@
       history.replaceState(null, "", "#/requests");
     }
     renderNav();
+    // кнопка в шапке: в разделе «Транспорт» добавляет машину, в остальных — заявку
+    const nb = $(".new-btn"), fleet = view.id === "fleet";
+    nb.dataset.action = fleet ? "new-vehicle" : "new-request";
+    nb.title = fleet ? "Добавить авто" : "Новая заявка";
+    nb.innerHTML = `${icon("plus")}<span>${nb.title}</span>`;
     $("#page-title").textContent = view.title;
     document.title = `${view.title} · Azim Travel CRM`;
     const scroll = window.scrollY;
@@ -612,7 +622,8 @@
       const date = (x && x.d) || addDays(r.from, i);
       const tip = [fmtDateLong(date), x && x.route ? expandRoute(x.route) : "маршрут не указан",
         x && x.svc.length ? svcText(x.svc) : "", x && x.cost ? fmtUsd(x.cost) : ""].filter(Boolean).join("\n");
-      return `<td class="dc ${date === TODAY ? "today" : ""}" title="${esc(tip)}"><div class="in">
+      const tn = tint(x);
+      return `<td class="dc ${r.cancelled ? "" : "ed"} ${tn.cls} ${date === TODAY ? "today" : ""}" ${tn.style} data-day="${date}" title="${esc(tip)}"><div class="in">
         <div class="dd">${fmtDate(date)}, ${date === TODAY ? "сегодня" : dow(date)}</div>
         ${x && x.route ? `<div class="dr">${esc(x.route)}</div>` : ""}
         ${x ? x.svc.map((s) => `<div class="sv ${s.s ? svcInfo(s.s).kind : ""}">${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${esc(s.s || "")}</div>`).join("") : ""}
@@ -640,7 +651,7 @@
           <tbody>
           ${list.map((r) => {
             const st = reqStatus(r), ps = payStatus(r), paid = paidOf(r), e = parseEscort(r.escort);
-            return `<tr class="clickable ${st === "cancelled" ? "cancelled" : ""}" data-open-request="${r.id}">
+            return `<tr class="clickable ${st === "cancelled" ? "cancelled" : ""}" data-open-request="${r.id}" data-cell="req" data-id="${r.id}">
               <td class="sk sk1 num">${r.no}</td>
               <td class="sk sk2"><div class="cust">${esc(r.customer)}</div><span class="badge ${st}">${STATUS[st]}</span></td>
               <td class="c">${esc(r.transport || "—")}</td>
@@ -749,9 +760,9 @@
       customer: preset.customer || "", group: "", country: "", pax: "", transport: "", escort: "",
       from: addDays(TODAY, 7), to: addDays(TODAY, 13), rate: db.settings.rate, vat: db.settings.vat, days: [],
     };
-    modal = { type: "request-form", id, days: src.days.map((d) => ({ route: d.route || "", svc: svcToText(d.svc), cost: d.cost || "" })) };
+    modal = { type: "request-form", id, days: daySlots(src).map((d) => ({ route: d.route || "", svc: svcToText(d.svc), cost: d.cost || "", color: d.color })) };
     const customersList = [...new Set(db.requests.map((x) => x.customer))].sort((a, b) => a.localeCompare(b, "ru"));
-    const routes = [...new Set(db.requests.flatMap((x) => x.days.map((d) => d.route)).filter(Boolean))].slice(0, 200);
+    const routes = knownRoutes();
     const f = (name, label, value, attrs = "", cls = "") => `<div class="field ${cls}"><label>${label}</label><input class="input" name="${name}" value="${esc(value ?? "")}" ${attrs}></div>`;
     showModal(`
       <form class="modal" data-form="request" novalidate>
@@ -786,6 +797,18 @@
       </form>`);
     renderFormDays();
   }
+  // строки формы по дням тура: по дате, если она внутри тура, иначе по номеру дня (в программе бывают пустые дни)
+  function daySlots(r) {
+    const slots = [];
+    for (const d of r.days) {
+      let i = d.d && r.from && d.d >= r.from ? diffDays(r.from, d.d) : d.n - 1;
+      while (slots[i]) i++;
+      slots[i] = d;
+    }
+    return Array.from(slots, (d) => d || {});
+  }
+  const knownRoutes = () => [...new Set([...db.requests.flatMap((x) => x.days), ...db.vehicles.flatMap((v) => v.schedule)]
+    .map((d) => d.route).filter(Boolean))].slice(0, 300);
   const svcToText = (svc) => (svc || []).map((s) => [s.t, s.s].filter(Boolean).join(" ")).join(", ");
   function textToSvc(text) {
     return String(text || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
@@ -844,7 +867,8 @@
     const n = diffDays(v("from"), v("to")) + 1;
     const days = modal.days.slice(0, n).map((x, i) => ({
       n: i + 1, d: addDays(v("from"), i), route: x.route.trim() || null, svc: textToSvc(x.svc), cost: +x.cost || 0,
-    })).filter((d) => d.route || d.svc.length || d.cost);
+      ...(x.color != null && { color: x.color }),
+    })).filter((d) => d.route || d.svc.length || d.cost || d.color != null);
     const fields = {
       customer: v("customer"), group: v("group") || null, country: v("country") || null, pax: +v("pax") || null,
       transport: v("transport") || null, escort: v("escort") || null, from: v("from"), to: v("to"),
@@ -867,6 +891,147 @@
     }
     closeModal();
     drawer = { type: "request", id: r.id };
+    rerender();
+  }
+
+  /* ---------- Клетка графика: один день заявки или машины ---------- */
+  const cellOwner = (kind, id) => (kind === "req" ? reqById(id) : vehById(id));
+  const cellList = (kind, x) => (kind === "req" ? x.days : x.schedule);
+  function openCellEditor(kind, id, d) {
+    const x = cellOwner(kind, id);
+    if (!x || !d) return;
+    const day = cellList(kind, x).find((y) => y.d === d) || {};
+    // день заявки листается только в её датах, у машины — без ограничений
+    const lo = kind === "req" ? x.from : null, hi = kind === "req" ? x.to || x.from : null;
+    const step = (n, label, ic, off) => `<button class="btn icon sm ghost" type="button" data-action="cell-step" data-step="${n}" aria-label="${label}" title="${label}" ${off ? "disabled" : ""}>${icon(ic)}</button>`;
+    const sw = (c, label) => `<button type="button" class="vc ${c === "gray" ? "gray" : ""} ${day.color === c ? "on" : ""}" ${c === "gray" ? "" : `style="--vh:${c}"`}
+      data-action="cell-color" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
+    modal = { type: "cell", kind, id, d };
+    showModal(`
+      <form class="modal sm" data-form="cell" novalidate style="width:min(540px,100%)">
+        <div class="modal-h">
+          <div style="min-width:0">
+            <h3 class="nowrap" style="overflow:hidden;text-overflow:ellipsis">${kind === "req" ? `${rdot(x)}№${x.no} · ${esc(x.customer)}` : `${vdot(x)}${esc(vehTitle(x))}`}</h3>
+            <div class="small muted" style="margin-top:3px">${DOW_LONG[parseISO(d).getDay()]}, ${fmtDateLong(d)}${kind === "req" ? ` · день ${diffDays(x.from, d) + 1} из ${reqDays(x)}` : ""}</div>
+          </div>
+          <div class="spacer" style="flex:1"></div>
+          ${step(-1, "Предыдущий день", "chevronLeft", lo && d <= lo)}${step(1, "Следующий день", "chevron", hi && d >= hi)}
+          <button class="btn icon sm ghost" type="button" data-action="close-modal" aria-label="Закрыть">${icon("x")}</button>
+        </div>
+        <div class="modal-b">
+          <div class="form-grid" style="grid-template-columns:minmax(0,1fr) 120px">
+            <div class="field"><label>Маршрут</label><input class="input" name="route" list="dl-routes" autocomplete="off" value="${esc(day.route || "")}" placeholder="Бух-Сам"></div>
+            <div class="field"><label>Стоимость, $</label><input class="input num" name="cost" type="number" min="0" step="any" value="${day.cost || ""}"></div>
+            <div class="field span4"><label>Услуги</label><input class="input" name="svc" autocomplete="off" value="${esc(svcToText(day.svc))}" placeholder="07:40 вс аэ, экя, ужин"></div>
+            <div class="field span4"><label>Цвет клетки</label>
+              <div class="hue-pick cell-colors">
+                <button type="button" class="auto vc ${kind === "veh" && x.partner ? "gray" : ""} ${day.color == null ? "on" : ""}" style="--vh:${x.hue}" data-action="cell-color" data-c=""><span class="vdot"></span>${kind === "req" ? "Как у заявки" : "Как у машины"}</button>
+                ${HUES.map((h) => sw(h, "Свой цвет")).join("")}${sw("gray", "Серый")}
+              </div>
+              <input type="hidden" name="color" value="${day.color ?? ""}">
+            </div>
+          </div>
+          <p class="small muted" style="margin:10px 0 0">Услуги через запятую, время — в начале. Стрелки вверху сохраняют день и переходят к соседнему.</p>
+        </div>
+        <div class="modal-f">
+          <button class="btn ghost" type="button" data-action="cell-open" style="margin-right:auto">${kind === "req" ? "Карточка заявки" : "Карточка машины"}</button>
+          ${day.d ? `<button class="btn danger" type="button" data-action="cell-clear">${icon("trash")}Очистить</button>` : ""}
+          <button class="btn" type="button" data-action="close-modal">Отмена</button>
+          <button class="btn primary" type="submit">Сохранить</button>
+        </div>
+        <datalist id="dl-routes">${knownRoutes().map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      </form>`);
+    setTimeout(() => { const i = $("#modal-layer [name=route]"); if (i) i.select(); }, 40);
+  }
+  function saveCell(form) {
+    const { kind, id, d } = modal, x = cellOwner(kind, id), list = cellList(kind, x), el = form.elements;
+    const val = { route: el.route.value.trim() || null, svc: textToSvc(el.svc.value), cost: +el.cost.value || 0 };
+    const c = el.color.value, color = c === "" ? null : c === "gray" ? "gray" : +c;
+    const i = list.findIndex((y) => y.d === d), old = list[i];
+    const oldColor = (old && old.color) ?? null;
+    const empty = !val.route && !val.svc.length && !val.cost && color == null;
+    if (old ? JSON.stringify([old.route, old.svc, old.cost || 0, oldColor]) === JSON.stringify([val.route, val.svc, val.cost, color]) : empty) return;
+    if (empty) list.splice(i, 1);
+    else {
+      let day = old;
+      if (!day) {
+        day = kind === "req" ? { n: diffDays(x.from, d) + 1, d } : { d };
+        list.push(day);
+        list.sort((p, q) => p.d.localeCompare(q.d));
+      }
+      Object.assign(day, val);
+      if (color == null) delete day.color; else day.color = color;
+    }
+    if (kind === "req") x.total = x.days.reduce((s, y) => s + (y.cost || 0), 0);
+    const recolor = oldColor !== color ? (color == null ? "цвет по умолчанию" : "свой цвет") : "";
+    (x.log || (x.log = [])).push({ ts: nowStamp(), text: empty ? `Очищен день ${fmtDate(d)}`
+      : `Изменён день ${fmtDate(d)}: ${[val.route, svcToText(val.svc), val.cost && fmtUsd(val.cost), recolor].filter(Boolean).join(" · ")}` });
+    toast("Сохранено");
+    rerender();
+  }
+
+  /* ---------- Форма машины ---------- */
+  function openVehicleForm(id) {
+    const v = id ? vehById(id) : null;
+    const src = v || { partner: false, brand: "", plate: "", driver: "", seats: "" };
+    const brands = [...new Set(db.vehicles.filter((x) => !x.partner).map((x) => x.brand))];
+    const seats = [...new Set([...db.vehicles.map((x) => x.seats).filter(Boolean), ...TRANSPORT_TYPES])];
+    const f = (name, label, value, attrs = "") => `<div class="field"><label>${label}</label><input class="input" name="${name}" value="${esc(value ?? "")}" autocomplete="off" ${attrs}></div>`;
+    modal = { type: "vehicle-form", id };
+    showModal(`
+      <form class="modal sm" data-form="vehicle" novalidate>
+        <div class="modal-h"><h3>${v ? "Изменить транспорт" : "Добавить авто"}</h3><div class="spacer" style="flex:1"></div>
+          <button class="btn icon sm ghost" type="button" data-action="close-modal" aria-label="Закрыть">${icon("x")}</button></div>
+        <div class="modal-b">
+          <div class="form-grid" style="grid-template-columns:1fr 1fr">
+            <div class="field span4"><label>Чей транспорт</label><select class="input" name="partner">
+              <option value="" ${src.partner ? "" : "selected"}>Свой автопарк</option>
+              <option value="1" ${src.partner ? "selected" : ""}>Частный перевозчик</option></select></div>
+            ${f("brand", "Марка", src.partner ? "" : src.brand, 'list="dl-brands" placeholder="ASIASTAR"')}
+            ${f("plate", "Госномер", src.plate, 'placeholder="30 577 ABA"')}
+            ${f("driver", "Водитель / перевозчик", src.driver || (src.partner ? src.name : ""), 'placeholder="Озод"')}
+            ${f("seats", "Мест / тип", src.seats, 'list="dl-seats" placeholder="55+2"')}
+          </div>
+          <div class="field" style="margin-top:6px"><span class="err" id="form-err"></span></div>
+        </div>
+        <div class="modal-f">
+          ${v && !v.schedule.length && !(v.payments || []).length ? `<button class="btn danger" type="button" data-action="del-vehicle" data-id="${v.id}" style="margin-right:auto">${icon("trash")}Удалить</button>` : ""}
+          <button class="btn" type="button" data-action="close-modal">Отмена</button>
+          <button class="btn primary" type="submit">${v ? "Сохранить" : "Добавить"}</button>
+        </div>
+        <datalist id="dl-brands">${brands.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+        <datalist id="dl-seats">${seats.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      </form>`);
+  }
+  function submitVehicleForm(form) {
+    const el = form.elements, v = (n) => el[n].value.trim(), err = $("#form-err");
+    $$(".input.invalid", form).forEach((i) => i.classList.remove("invalid"));
+    const bad = (name, msg) => { el[name].classList.add("invalid"); el[name].focus(); err.textContent = msg; };
+    const partner = el.partner.value === "1";
+    if (!partner && !v("brand")) return bad("brand", "Укажите марку");
+    if (partner && !v("driver")) return bad("driver", "Укажите имя перевозчика");
+    const brand = partner ? "Партнёр"
+      : db.vehicles.filter((x) => !x.partner).map((x) => x.brand).find((b) => b.toLowerCase() === v("brand").toLowerCase()) || v("brand");
+    const fields = { partner, brand, plate: v("plate") || null, driver: v("driver") || null, seats: v("seats") || null };
+    const name = (partner ? [fields.driver, fields.seats] : [brand, fields.seats, fields.plate, fields.driver]).filter(Boolean).join(" ");
+    let x = modal.id && vehById(modal.id);
+    if (x) {
+      // название из Excel не трогаем, пока данные машины не изменились
+      if (Object.keys(fields).some((k) => String(x[k] ?? "") !== String(fields[k] ?? ""))) {
+        Object.assign(x, fields, { name });
+        (x.log || (x.log = [])).push({ ts: nowStamp(), text: "Изменены данные машины" });
+      }
+      toast("Сохранено");
+    } else {
+      // свои машины — после последней своей, частные — в конец списка
+      const at = partner ? db.vehicles.length : db.vehicles.findLastIndex((y) => !y.partner) + 1;
+      x = { id: "V" + Date.now(), no: Math.max(0, ...db.vehicles.map((y) => y.no)) + 1, name, ...fields, sold: false, hue: autoHue(at),
+        schedule: [], payments: [], log: [{ ts: nowStamp(), text: "Добавлен в транспорт" }] };
+      db.vehicles.splice(at, 0, x);
+      toast(`Добавлено: ${vehTitle(x)}`);
+    }
+    closeModal();
+    drawer = { type: "vehicle", id: x.id };
     rerender();
   }
 
@@ -972,20 +1137,22 @@
           <h2>${rangeTitle(rg)}</h2>
           <span class="sub">${rows.length} ${plural(rows.length, "заявка", "заявки", "заявок")} · ${fmtNum(pax)} туристов</span>
           <div class="spacer"></div>
-          <div class="legend"><span>У каждой заявки свой цвет</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span><i style="background:var(--today);border:1px solid var(--accent)"></i>Сегодня</span></div>
+          <div class="legend"><span>У каждой заявки свой цвет</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span><i style="background:var(--today);border:1px solid var(--accent)"></i>Сегодня</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить день или цвет</span></div>
         </div>
         <div class="tl-wrap" data-keep-scroll="cal">
           ${rows.length ? `<table class="tl tl-period" style="--days:${rg.dates.length}">${ribbonHead(rg, "Заявка")}
           <tbody>${rows.map((r) => {
             const byDate = new Map(r.days.map((d) => [d.d, d]));
             const to = r.to || r.from;
-            return `<tr class="vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}" data-from="${r.from}" data-to="${to}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, r.pax && r.pax + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
+            return `<tr class="vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}" data-from="${r.from}" data-to="${to}" data-cell="req" data-id="${r.id}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, r.pax && r.pax + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
               ${rg.dates.map((d, i) => {
                 if (d < r.from || d > to) return `<td class="tday ${rg.colCls[i]}"></td>`;
                 const x = byDate.get(d);
-                const tip = `№${r.no} ${r.customer}\n${fmtDateLong(d)}\n${x && x.route ? expandRoute(x.route) : "маршрут не указан"}${x && x.svc.length ? "\n" + svcText(x.svc) : ""}${x && x.cost ? `\n${fmtUsd(x.cost)}` : ""}`;
+                const tip = `№${r.no} ${r.customer}\n${fmtDateLong(d)}\n${x && x.route ? expandRoute(x.route) : "маршрут не указан"}${x && x.svc.length ? "\n" + svcText(x.svc) : ""}${x && x.cost ? `\n${fmtUsd(x.cost)}` : ""}${r.cancelled ? "" : "\n\nНажмите, чтобы изменить"}`;
                 const moving = x && x.route && x.route.includes("-");
-                return `<td class="tday on ${rg.colCls[i]}" data-open-request="${r.id}" title="${esc(tip)}"><div class="cellbar ${r.cancelled ? "cx" : moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc)}</div></td>`;
+                // аннулированная заявка не редактируется по клеткам — открывается карточка
+                const tn = tint(x);
+                return `<td class="tday on ${r.cancelled ? "" : "ed"} ${tn.cls} ${rg.colCls[i]}" ${tn.style} ${r.cancelled ? `data-open-request="${r.id}"` : ""} title="${esc(tip)}"><div class="cellbar ${r.cancelled ? "cx" : moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc)}</div></td>`;
               }).join("")}</tr>`;
           }).join("")}</tbody></table>` : `<div class="empty">Заявок не найдено</div>`}
         </div>
@@ -1062,18 +1229,20 @@
   function fleetChart(list, rg) {
     const rows = list.filter((v) => !v.sold || v.schedule.length);
     return `<div class="card"><div class="card-h wrap"><h2>График транспорта · ${rangeTitle(rg).toLowerCase()}</h2><div class="spacer"></div>
-      <div class="legend"><span>У каждой машины свой цвет, частные — серые</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span></div></div>
+      <div class="legend"><span>У каждой машины свой цвет, частные — серые</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить рейс или цвет, на пустую — добавить рейс</span></div></div>
       <div class="tl-wrap" data-keep-scroll="fleet"><table class="tl tl-period" style="--days:${rg.dates.length}">${ribbonHead(rg, "Транспорт")}
       <tbody>${rows.map((v) => {
         const by = new Map(v.schedule.map((x) => [x.d, x]));
-        return `<tr class="vc ${v.partner ? "gray" : ""}" style="--vh:${v.hue}"><td class="rowh" data-open-vehicle="${v.id}"><div class="t1">${vdot(v)}${esc(vehTitle(v))}</div><div class="t2">${esc([vehSub(v), v.schedule.length + " дн."].filter((x) => x !== "—").join(" · "))}</div></td>
+        return `<tr class="vc ${v.partner ? "gray" : ""}" style="--vh:${v.hue}" data-cell="veh" data-id="${v.id}"><td class="rowh" data-open-vehicle="${v.id}"><div class="t1">${vdot(v)}${esc(vehTitle(v))}</div><div class="t2">${esc([vehSub(v), v.schedule.length + " дн."].filter((x) => x !== "—").join(" · "))}</div></td>
           ${rg.dates.map((d, i) => {
             const x = by.get(d);
-            if (!x) return `<td class="tday ${rg.colCls[i]}"></td>`;
+            // пустая клетка: клик добавляет рейс (у проданной машины — нет)
+            if (!x) return `<td class="tday ${v.sold ? "" : "ed add"} ${rg.colCls[i]}"></td>`;
             const prev = by.get(addDays(d, -1)), next = by.get(addDays(d, 1));
             const moving = x.route && x.route.includes("-");
-            const tip = `${vehTitle(v)}\n${fmtDateLong(d)}\n${x.route ? expandRoute(x.route) : "—"}${x.svc.length ? "\n" + svcText(x.svc) : ""}${x.cost ? "\n" + fmtUsd(x.cost) : ""}`;
-            return `<td class="tday on ${rg.colCls[i]}" data-open-vehicle="${v.id}" title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc)}</div></td>`;
+            const tip = `${vehTitle(v)}\n${fmtDateLong(d)}\n${x.route ? expandRoute(x.route) : "—"}${x.svc.length ? "\n" + svcText(x.svc) : ""}${x.cost ? "\n" + fmtUsd(x.cost) : ""}\n\nНажмите, чтобы изменить`;
+            const tn = tint(x);
+            return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc)}</div></td>`;
           }).join("")}</tr>`;
       }).join("")}</tbody></table></div></div>`;
   }
@@ -1095,7 +1264,10 @@
       <div class="drawer-h">
         <div><h3>${vdot(v)}${esc(vehTitle(v))}</h3><div class="sub">${esc(v.name)}</div>
           <div style="margin-top:8px">${v.sold ? '<span class="badge sold">Продан</span>' : t ? `<span class="badge active">Сегодня: ${esc(t.route || "в работе")}</span>` : '<span class="badge plain">Сегодня свободен</span>'}</div></div>
-        <div class="actions"><button class="btn icon sm ghost" data-action="close-drawer" aria-label="Закрыть">${icon("x")}</button></div>
+        <div class="actions">
+          <button class="btn sm" data-action="edit-vehicle" data-id="${v.id}">${icon("edit")}Изменить</button>
+          <button class="btn icon sm ghost" data-action="close-drawer" aria-label="Закрыть">${icon("x")}</button>
+        </div>
       </div>
       <div class="drawer-b">
         <div class="section-t">Информация</div>
@@ -1476,6 +1648,8 @@
     e.preventDefault();
     const f = form.elements;
     if (kind === "request") return submitRequestForm(form);
+    if (kind === "vehicle") return submitVehicleForm(form);
+    if (kind === "cell") { saveCell(form); return closeModal(); }
     if (kind === "payment") {
       const r = reqById(form.dataset.id), amount = +f.amount.value;
       if (!(amount > 0)) { f.amount.classList.add("invalid"); f.amount.focus(); return; }
@@ -1535,6 +1709,13 @@
 
     const a = t.closest("[data-action]");
     const action = a && a.dataset.action;
+    // клетка дня в графиках и в таблице «Как в Excel» — редактор этого дня
+    const cell = !a && t.closest("td.ed");
+    if (cell) {
+      const row = cell.closest("[data-cell]"), w = cell.closest("[data-keep-scroll]");
+      const d = cell.dataset.day || ribbons[w.dataset.keepScroll].dates[cell.cellIndex - 1];
+      return openCellEditor(row.dataset.cell, row.dataset.id, d);
+    }
     // открытие карточек; кнопка с действием внутри строки имеет приоритет
     const opener = t.closest("[data-open-request],[data-open-vehicle],[data-open-client]");
     if (opener && (!a || a.contains(opener))) {
@@ -1557,6 +1738,42 @@
       }
       case "new-request": e.preventDefault(); openRequestForm(null, { customer: a.dataset.customer }); break;
       case "edit-request": openRequestForm(a.dataset.id); break;
+      case "new-vehicle": openVehicleForm(null); break;
+      case "edit-vehicle": openVehicleForm(a.dataset.id); break;
+      case "del-vehicle": {
+        const v = vehById(a.dataset.id);
+        if (!(await confirmBox(`<b>Удалить ${esc(vehTitle(v))}?</b><p class="muted" style="margin-bottom:0">У машины нет рейсов и выплат, больше ничего не изменится.</p>`, "Удалить", true))) return;
+        db.vehicles.splice(db.vehicles.indexOf(v), 1);
+        drawer = null;
+        toast("Транспорт удалён");
+        rerender();
+        break;
+      }
+      case "cell-step": {
+        const { kind, id, d } = modal;
+        saveCell($("form[data-form=cell]"));
+        openCellEditor(kind, id, addDays(d, +a.dataset.step));
+        break;
+      }
+      case "cell-clear": {
+        const f = $("form[data-form=cell]");
+        for (const n of ["route", "svc", "cost", "color"]) f.elements[n].value = "";
+        saveCell(f);
+        closeModal();
+        break;
+      }
+      case "cell-color": {
+        const f = a.closest("form");
+        f.elements.color.value = a.dataset.c;
+        $$(".cell-colors button", f).forEach((b) => b.classList.toggle("on", b === a));
+        break;
+      }
+      case "cell-open": {
+        const { kind, id } = modal;
+        closeModal();
+        openDrawer(kind === "req" ? "request" : "vehicle", id);
+        break;
+      }
       case "close-drawer": closeDrawer(); break;
       case "close-modal": closeModal(); break;
       case "modal-bg": if (t === a && modal && modal.type === "confirm") { modal.resolve(false); closeModal(); } break;
@@ -1655,7 +1872,6 @@
   /* ================= Старт ================= */
   $(".menu-btn").innerHTML = icon("menu");
   $("#search-icon").innerHTML = icon("search");
-  $(".new-btn").innerHTML = `${icon("plus")}<span>Новая заявка</span>`;
   $("#theme-btn").innerHTML = icon(document.documentElement.dataset.theme === "dark" ? "sun" : "moon");
   window.addEventListener("hashchange", () => {
     $("#app").classList.remove("nav-open");
