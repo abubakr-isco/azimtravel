@@ -1,5 +1,5 @@
 """
-Импорт данных из Excel-файла «Графики июль–декабрь 2026» в js/data.js для демо CRM.
+Импорт данных из Excel-файла «Графики июль–декабрь 2026» в js/data.js — начальные данные CRM.
 
 Запуск (нужен openpyxl):
     pip install openpyxl
@@ -69,6 +69,25 @@ def as_num(v):
     return None
 
 
+def read_pax(v):
+    """Туристы: число для сумм и запись как в Excel («12+1», «15/22») для показа."""
+    if isinstance(v, (int, float)):
+        return (int(v) or None), None
+    if isinstance(v, (dt.datetime, dt.date)):
+        # Excel превратил запись вида «7/7» в дату
+        text = f"{v.day}/{v.month}"
+        print(f"  туристы записаны как дата {v:%d.%m.%Y}, сохранено как «{text}»")
+        return v.day, text
+    text = clean(v)
+    if not isinstance(text, str):
+        return None, None
+    if text.isdigit():
+        return int(text), None
+    nums = [int(n) for n in re.findall(r"\d+", text)]
+    pax = (sum(nums) if "+" in text else nums[0]) if nums else None
+    return pax, text
+
+
 def services(ws, rows, left_col, right_col):
     """Услуги дня: в левой колонке время, в правой — услуга (вс аэ, пр ж/в, экя...)."""
     out = []
@@ -102,7 +121,7 @@ def read_requests(wb):
         date_from = as_date(ws.cell(main, 5).value)
         date_to = as_date(ws.cell(main, 6).value)
         if not date_from or date_from < "2026-01-01":
-            print(f"  пропущена заявка №{no} ({customer}): дата {date_from}")
+            print(f"  пропущена заявка №{no} ({customer}): дата {date_from} — пустая строка-образец")
             continue
         country = clean(ws.cell(main, 7).value)
         escort = clean(ws.cell(main, 9).value)
@@ -150,14 +169,17 @@ def read_requests(wb):
                              "note": f"Перечисление, приложение №{annex}" if annex else "Перечисление"})
 
         transport = clean(ws.cell(main, 3).value)
-        pax = as_num(ws.cell(main, 4).value)
+        pax, pax_text = read_pax(ws.cell(main, 4).value)
+        if pax_text:
+            print(f"  заявка №{no}: туристы «{pax_text}»")
         group = clean(ws.cell(main, 8).value)
         requests.append({
             "id": f"R{k + 1}",
             "no": int(no) if isinstance(no, (int, float)) else k + 1,
             "customer": customer,
             "transport": str(transport) if transport is not None else None,
-            "pax": int(pax) if pax else None,
+            "pax": pax,
+            "paxText": pax_text,
             "from": date_from,
             "to": date_to,
             "country": country,

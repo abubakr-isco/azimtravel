@@ -1,4 +1,4 @@
-/* ========== Azim Travel CRM — демо ========== */
+/* ========== Azim Travel CRM ========== */
 :root {
   --bg: #f4f5f7;
   --surface: #ffffff;
@@ -121,8 +121,20 @@ svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor;
 .nav a .count { margin-left: auto; font-size: 11.5px; color: var(--muted); font-weight: 500; }
 .nav a.active .count { color: var(--primary); }
 .sidebar-foot { padding: 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
-.demo-badge { font-size: 12px; color: var(--muted); background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 10px; }
-.demo-badge b { color: var(--accent); font-weight: 600; }
+/* где хранятся данные и дошли ли правки до сервера */
+.sync { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 10px; line-height: 1.4; }
+.sync:empty { display: none; }
+.sync i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transform: translateY(-1px); }
+.sync.ok i { background: var(--success); }
+.sync.saving i { background: var(--warning); }
+.sync.error, .sync.auth { color: var(--danger); background: var(--danger-soft); }
+.sync.error i, .sync.auth i { background: var(--danger); }
+.sync.offline { color: var(--warning); background: var(--warning-soft); }
+.sync.offline i { background: var(--warning); }
+.sync a { color: inherit; font-weight: 600; }
+.boot { max-width: 460px; margin: 80px auto; text-align: center; color: var(--muted); display: grid; gap: 12px; }
+.boot.err b { color: var(--danger); font-weight: 600; }
+.boot p { margin: 0; }
 .user { display: flex; align-items: center; gap: 10px; }
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; flex: none;
@@ -303,6 +315,70 @@ table.sheet { border-collapse: separate; border-spacing: 0; font-size: 12.5px; m
   border-top: 1px solid var(--border-strong); border-bottom: 0; border-right: 0; white-space: nowrap;
 }
 
+/* ---------- Учёт водителей (книга водителя как в Excel) ---------- */
+.acc-t th, .acc-t td { padding: 6px 8px; }
+.acc-t th { white-space: nowrap; vertical-align: bottom; }
+.acc-t th small { display: block; font-size: 11px; font-weight: 500; opacity: .75; }
+.acc-t th.c, .acc-t td.c { text-align: center; }
+.acc-t td.nw, .acc-t .nw { white-space: nowrap; }
+.acc-t td.wrap-cell { min-width: 160px; max-width: 280px; }
+.acc-t td.empty { padding: 28px 16px; }
+.acc-t td.strong { font-weight: 650; }
+.acc-t td.neg { color: var(--danger); }
+.acc-t td.split-cell { font-size: 12.5px; color: var(--text-2); min-width: 150px; }
+.acc-t tbody td { border-bottom-color: var(--border); }
+.acc-days td.prog { min-width: 180px; max-width: 300px; color: var(--text-2); font-size: 12.5px; }
+.acc-days td:first-child { position: relative; width: 44px; color: var(--muted); }
+.acc-split {
+  position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 5px; background: var(--surface-3); color: var(--text-2); display: grid; place-items: center; cursor: pointer; opacity: 0;
+}
+.acc-split svg.i { width: 13px; height: 13px; }
+.acc-days tr:hover .acc-split, .acc-split:focus-visible { opacity: 1; }
+.acc-split:hover { background: var(--primary-soft); color: var(--primary); }
+.acc-route {
+  border: 0; background: none; padding: 2px 0; font: inherit; font-weight: 600; color: var(--text); text-align: left; cursor: pointer;
+  border-bottom: 1px dashed var(--border-strong); min-width: 110px;
+}
+.acc-route:hover { color: var(--primary); border-bottom-color: var(--primary); }
+.ai {
+  width: 100%; min-width: 88px; height: 30px; padding: 0 7px; border: 1px solid transparent; border-radius: 6px;
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px;
+}
+.ai.num { min-width: 96px; padding-right: 9px; text-align: right; font-variant-numeric: tabular-nums; }
+.ai.txt { min-width: 150px; }
+.ai[type=date] { min-width: 132px; }
+.ai[type=month] { min-width: 150px; }
+select.ai { min-width: 160px; cursor: pointer; }
+.ai:hover { border-color: var(--border-strong); }
+.ai:focus { outline: none; border-color: var(--primary); background: var(--surface); box-shadow: 0 0 0 3px var(--primary-soft); }
+.ai::placeholder { color: var(--muted); opacity: .75; font-style: italic; }
+.ai.box { height: 34px; background: var(--surface); border-color: var(--border-strong); }
+.acc-note { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 14px; }
+.acc-note svg.i { flex: none; width: 15px; height: 15px; margin-top: 2px; }
+.acc-note span svg.i { display: inline; vertical-align: -2px; margin: 0 1px; }
+.acc-sheet { margin-bottom: 16px; scroll-margin-top: 76px; }
+.acc-meta { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(220px, 2fr) minmax(90px, .6fr) minmax(120px, .8fr); gap: 10px 12px; padding: 0 16px 12px; }
+.acc-meta .field > span { font-size: 12px; color: var(--muted); font-weight: 500; }
+.acc-foot { display: flex; flex-wrap: wrap; gap: 6px 22px; padding: 11px 16px 13px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
+.acc-foot b { color: var(--text); font-weight: 650; margin-left: 3px; }
+.acc-foot b.neg { color: var(--danger); }
+.acc-foot b.ok { color: var(--success); }
+.acc-tabs button { white-space: nowrap; }
+.acc-calc { display: flex; flex-direction: column; }
+.acc-calc > div { display: flex; justify-content: space-between; gap: 16px; padding: 9px 2px; border-bottom: 1px solid var(--border); }
+.acc-calc .k { color: var(--text-2); }
+.acc-calc .v { font-weight: 600; }
+.acc-calc .tot { border-bottom: 0; margin-top: 4px; padding: 11px 12px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.acc-calc .tot .k { color: var(--text); font-weight: 650; }
+.acc-calc .tot .v { font-size: 18px; font-weight: 700; }
+.acc-calc .tot.ok .v { color: var(--success); }
+.acc-calc .tot.neg .v { color: var(--danger); }
+@media (max-width: 900px) {
+  .acc-meta { grid-template-columns: 1fr 1fr; }
+  .acc-meta .wide { grid-column: 1 / -1; }
+}
+
 /* ---------- Badges / chips ---------- */
 .badge {
   display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 999px;
@@ -400,6 +476,8 @@ table.tl { border-collapse: separate; border-spacing: 0; font-size: 12px; }
 .tl .rowh .t1 { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .tl .rowh .t2 { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl td.today, .tl th.today { background-color: var(--today); }
+/* шапка «сегодня» — оттенок поверх плотного фона, иначе сквозь неё видно строки под ней */
+.tl thead th.today { background: linear-gradient(var(--today), var(--today)), var(--surface-2); }
 .tl td.tday { position: relative; min-width: 46px; }
 .tl td.on { cursor: pointer; }
 .tl .cellbar {
@@ -446,6 +524,7 @@ table.tl { border-collapse: separate; border-spacing: 0; font-size: 12px; }
 .tl-period .cellbar b { font-size: 11.5px; font-weight: 650; max-width: 100%; white-space: normal; overflow-wrap: break-word; }
 .tl-period .cellbar .sl { font-size: 10.5px; font-weight: 500; max-width: 100%; overflow: hidden; text-overflow: ellipsis; opacity: .92; }
 .tl-period .cellbar .sl i { font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; margin-right: 3px; }
+.tl-period .cellbar .pr { margin-top: auto; padding-top: 3px; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: .9; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); align-items: center; }
 .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
 .legend .hint { display: inline-flex; align-items: center; gap: 5px; }

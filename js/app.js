@@ -1,8 +1,10 @@
-/* Azim Travel CRM — демо на данных из Excel (без сервера, хранение в localStorage) */
+/* Azim Travel CRM: данные хранятся на сервере (js/config.js → api, протокол в API.md) или, без сервера, в браузере */
 (() => {
   "use strict";
 
-  const DATA = window.AZIM_DATA;
+  const SEED = window.AZIM_DATA || null; // данные из Excel (js/data.js); в сборке без них — null
+  const CFG = window.AZIM_CONFIG || {};
+  const API = String(CFG.api || "").replace(/\/+$/, "");
   const STORE_KEY = "azim-crm-v1";
   const THEME_KEY = "azim-theme";
 
@@ -12,8 +14,8 @@
   const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
   const DOW = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
   const DOW_LONG = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
-  const PERIOD_MONTHS = [7, 8, 9, 10, 11, 12];
-  const YEAR = 2026;
+  // базовый период графиков из Excel; дальше период растёт сам — по датам в данных и по сегодняшнему дню
+  const BASE_FROM = "2026-07", BASE_TO = "2026-12";
 
   const SVC = {
     "вс аэ": { label: "Встреча в аэропорту", kind: "air", icon: "plane" },
@@ -76,6 +78,8 @@
     chevron: '<path d="m9 18 6-6-6-6"/>',
     chevronLeft: '<path d="m15 18-6-6 6-6"/>',
     chevronDown: '<path d="m6 9 6 6 6-6"/>',
+    wheel: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/><path d="M12 14v7M10 12H3M14 12h7"/>',
+    scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/>',
   };
   const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
@@ -162,27 +166,188 @@
     [...d.requests].sort((a, b) => (a.from || "").localeCompare(b.from || "") || a.no - b.no).forEach((r, i) => { r.hue = autoHue(i); });
     d.hueV = HUE_VERSION;
   }
+  const DEFAULT_SETTINGS = { rate: 12900, vat: 12, company: "Azim Travel" };
+  // начальные данные: из Excel, а если их нет в сборке — пустая база
   function fresh() {
-    const d = structuredClone(DATA);
+    const d = SEED ? structuredClone(SEED) : { source: null, importedAt: null, settings: { ...DEFAULT_SETTINGS }, requests: [], vehicles: [] };
     for (const r of d.requests) r.log = [{ ts: d.importedAt, text: "Импортировано из Excel" }];
     for (const v of d.vehicles) v.log = [];
     assignHues(d);
     d.seq = Math.max(0, ...d.requests.map((r) => r.no)) + 1;
     return d;
   }
-  function load() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORE_KEY));
-      if (saved && saved.importedAt === DATA.importedAt) {
-        if (saved.hueV !== HUE_VERSION) assignHues(saved);
-        return saved;
-      }
-    } catch (e) { /* хранилище недоступно — работаем без сохранения */ }
-    return fresh();
+  // проверка и доводка сохранённых данных до текущей версии программы; null — это не данные CRM
+  function upgrade(d) {
+    if (!d || typeof d !== "object" || !Array.isArray(d.requests) || !Array.isArray(d.vehicles)) return null;
+    d.settings = { ...DEFAULT_SETTINGS, ...d.settings };
+    for (const r of d.requests) { r.days = r.days || []; r.payments = r.payments || []; r.log = r.log || []; }
+    for (const v of d.vehicles) { v.schedule = v.schedule || []; v.payments = v.payments || []; v.log = v.log || []; }
+    if (d.hueV !== HUE_VERSION) assignHues(d);
+    if (!d.seq) d.seq = Math.max(0, ...d.requests.map((r) => r.no || 0)) + 1;
+    return d;
   }
-  let db = load();
+  let db = null;
+
+  /* ---------- Сохранение: сервер или браузер ---------- */
+  // сервер хранит всю базу одним документом с версией rev; если версия устарела (правил другой сотрудник) — ответ 409
+  // base — последняя версия с сервера (JSON): от неё видно, что изменили здесь, а что — другие сотрудники
+  const sync = { rev: null, base: null, dirty: false, busy: false, timer: 0, state: API ? "ok" : "local", msg: "", at: "" };
+  function readLocal() { try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { return null; } }
+  async function apiCall(method, body, query = "") {
+    let res;
+    try {
+      res = await fetch(`${API}/state${query}`, {
+        method, cache: "no-store", credentials: "include",
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+      });
+    } catch (e) { throw Object.assign(new Error("нет связи с сервером"), { offline: true }); }
+    if (res.status === 401 || res.status === 403) throw Object.assign(new Error("нужно войти"), { auth: true });
+    return res;
+  }
+  const readJson = (res) => res.json().catch(() => null);
+  async function loadDb() {
+    if (!API) return upgrade(readLocal()) || fresh();
+    const res = await apiCall("GET");
+    if (!res.ok && res.status !== 404) throw new Error(`сервер ответил ${res.status}`);
+    const j = res.ok ? await readJson(res) : null;
+    if (j && j.data) {
+      const d = upgrade(j.data);
+      if (!d) throw new Error("сервер вернул не данные CRM");
+      sync.rev = j.rev ?? null;
+      sync.base = JSON.stringify(d);
+      return d;
+    }
+    // на сервере ещё пусто — переносим туда данные из этого браузера, а если их нет — из Excel
+    sync.rev = (j && j.rev) ?? null;
+    sync.dirty = true;
+    return upgrade(readLocal()) || fresh();
+  }
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) { /* ignore */ }
+    if (!API) {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); setSync("local"); }
+      catch (e) { setSync("error", "не удалось сохранить в браузере: хранилище переполнено или запрещено"); }
+      return;
+    }
+    sync.dirty = true;
+    setSync("saving");
+    clearTimeout(sync.timer);
+    sync.timer = setTimeout(push, 400);
+  }
+  async function push() {
+    if (sync.busy || !sync.dirty) return;
+    sync.busy = true;
+    sync.dirty = false;
+    clearTimeout(sync.timer);
+    try {
+      const sent = JSON.stringify(db);
+      const res = await apiCall("PUT", `{"rev":${JSON.stringify(sync.rev)},"data":${sent}}`);
+      if (res.status === 409) return await conflict(await readJson(res));
+      if (!res.ok) throw new Error(`сервер ответил ${res.status}`);
+      sync.rev = ((await readJson(res)) || {}).rev ?? null;
+      sync.base = sent;
+      setSync(sync.dirty ? "saving" : "ok");
+    } catch (e) {
+      sync.dirty = true;
+      setSync(e.auth ? "auth" : "error", e.message);
+      sync.timer = setTimeout(push, e.auth ? 15000 : 5000);
+    } finally {
+      sync.busy = false;
+      if (sync.dirty && sync.state === "saving") sync.timer = setTimeout(push, 400);
+    }
+  }
+  // объединение правок: заявки и машины, изменённые здесь, переносятся в свежую версию с сервера;
+  // если ту же запись успел изменить другой сотрудник — остаётся его вариант
+  function mergeDb(base, mine, theirs) {
+    const out = structuredClone(theirs);
+    let lost = 0;
+    for (const key of ["requests", "vehicles"]) {
+      const b = new Map(base[key].map((x) => [x.id, JSON.stringify(x)]));
+      const t = new Map(theirs[key].map((x) => [x.id, JSON.stringify(x)]));
+      const m = new Map(mine[key].map((x) => [x.id, x]));
+      for (const [id, x] of m) {
+        const sx = JSON.stringify(x);
+        if (b.get(id) === sx) continue; // здесь не меняли
+        if (b.has(id) ? t.get(id) !== b.get(id) : t.has(id)) { if (t.get(id) !== sx) lost++; continue; } // там тоже меняли или удалили
+        const i = out[key].findIndex((y) => y.id === id);
+        if (i >= 0) out[key][i] = structuredClone(x); else out[key].push(structuredClone(x));
+      }
+      for (const [id, sb] of b) if (!m.has(id)) { // удалили здесь
+        if (t.get(id) === sb) out[key] = out[key].filter((y) => y.id !== id);
+        else if (t.has(id)) lost++;
+      }
+    }
+    if (JSON.stringify(mine.settings) !== JSON.stringify(base.settings)) {
+      if (JSON.stringify(theirs.settings) === JSON.stringify(base.settings)) out.settings = structuredClone(mine.settings); else lost++;
+    }
+    // новые заявки, созданные одновременно в двух местах, могли получить один номер
+    out.seq = Math.max(out.seq || 1, mine.seq || 1, ...out.requests.map((r) => (r.no || 0) + 1));
+    const baseIds = new Set(base.requests.map((r) => r.id)), theirIds = new Set(theirs.requests.map((r) => r.id));
+    for (const r of out.requests) {
+      if (baseIds.has(r.id) || theirIds.has(r.id)) continue;
+      if (out.requests.some((y) => y !== r && y.no === r.no)) {
+        const old = r.no;
+        r.no = out.seq++;
+        r.log.push({ ts: nowStamp(), text: `Номер изменён с №${old} на №${r.no}: такой номер одновременно получила другая заявка` });
+      }
+    }
+    return { data: out, lost };
+  }
+  // базу успели изменить с другого компьютера (ответ 409): объединяем и сохраняем ещё раз
+  async function conflict(j) {
+    if (!j || !j.data) {
+      try { const res = await apiCall("GET"); j = res.ok ? await readJson(res) : null; } catch (e) { j = null; }
+    }
+    const theirs = j && upgrade(j.data);
+    if (!theirs) { sync.dirty = true; setSync("error", "не удалось получить свежие данные"); sync.timer = setTimeout(push, 5000); return; }
+    const base = sync.base && upgrade(JSON.parse(sync.base));
+    const { data, lost } = base ? mergeDb(base, db, theirs) : { data: theirs, lost: 1 };
+    db = data;
+    sync.rev = j.rev ?? null;
+    sync.base = JSON.stringify(theirs);
+    sync.dirty = JSON.stringify(db) !== sync.base;
+    if (modal && lost) closeModal();
+    setSync(sync.dirty ? "saving" : "ok");
+    if (sync.dirty) sync.timer = setTimeout(push, 50);
+    render();
+    if (lost) toast(`Другой сотрудник только что изменил те же записи. Оставлен его вариант, проверьте свои последние правки (${lost} ${plural(lost, "запись", "записи", "записей")})`, 8000);
+  }
+  // раз в 30 секунд и при возврате на вкладку подтягиваем чужие правки, если сейчас ничего не вводится
+  async function pull() {
+    if (!API || !db || sync.dirty || sync.busy || document.hidden || modal) return;
+    const a = document.activeElement;
+    if (a && a.matches("input, select, textarea") && a.id !== "global-search") return;
+    try {
+      const res = await apiCall("GET", null, sync.rev != null ? `?rev=${encodeURIComponent(sync.rev)}` : "");
+      if (!res.ok) throw new Error(`сервер ответил ${res.status}`);
+      const j = await readJson(res);
+      if (sync.state !== "ok") setSync("ok");
+      if (!j || j.unchanged || !j.data || j.rev === sync.rev || sync.dirty || sync.busy || modal) return;
+      const d = upgrade(j.data);
+      if (!d) return;
+      db = d;
+      sync.rev = j.rev ?? null;
+      sync.base = JSON.stringify(d);
+      render();
+    } catch (e) { setSync(e.auth ? "auth" : "offline", e.message); }
+  }
+  function setSync(state, msg = "") {
+    sync.state = state;
+    sync.msg = msg;
+    if (state === "ok") sync.at = new Date().toTimeString().slice(0, 5);
+    const el = document.getElementById("sync");
+    if (!el) return;
+    const login = CFG.loginUrl ? ` <a href="${esc(CFG.loginUrl)}">Войти</a>` : "";
+    const text = {
+      local: "Данные хранятся в этом браузере",
+      ok: `Сохранено на сервере${sync.at ? " · " + sync.at : ""}`,
+      saving: "Сохраняю…",
+      error: `Не сохранено: ${esc(msg)}. Повторю через несколько секунд`,
+      offline: `Нет связи с сервером: ${esc(msg)}. Свежие данные не подтягиваются`,
+      auth: `Сервер просит войти заново.${login}`,
+    }[state];
+    el.className = `sync ${state}`;
+    el.innerHTML = `<i></i><span>${text}</span>`;
   }
 
   /* ================= Расчёты ================= */
@@ -194,6 +359,15 @@
     if (r.to && r.to < TODAY) return "done";
     if (r.from > TODAY) return "upcoming";
     return "active";
+  }
+  // туристы: число для сумм, а запись как в Excel («12+1», «15/22») — для показа
+  const paxOf = (r) => (r.paxText || r.pax || "");
+  function parsePax(s) {
+    s = String(s ?? "").trim();
+    if (!s) return { pax: null, paxText: null };
+    if (/^\d+$/.test(s)) return { pax: +s, paxText: null };
+    const nums = (s.match(/\d+/g) || []).map(Number);
+    return { pax: (/\+/.test(s) ? nums.reduce((a, b) => a + b, 0) : nums[0]) || null, paxText: s };
   }
   const paidOf = (x) => (x.payments || []).reduce((s, p) => s + (p.usd || 0), 0);
   const dueOf = (r) => (r.total || 0) - paidOf(r);
@@ -208,9 +382,29 @@
   const reqDays = (r) => (r.from && r.to ? diffDays(r.from, r.to) + 1 : r.days.length);
   const reqById = (id) => db.requests.find((r) => r.id === id);
   const vehById = (id) => db.vehicles.find((v) => v.id === id);
-  const inMonth = (s, m) => s && +s.slice(5, 7) === m && +s.slice(0, 4) === YEAR;
-  const daysInMonth = (m) => new Date(YEAR, m, 0).getDate();
-  const curMonth = () => { const m = +TODAY.slice(5, 7); return +TODAY.slice(0, 4) === YEAR && PERIOD_MONTHS.includes(m) ? m : 10; };
+  // месяц — строка "YYYY-MM"
+  const inMonth = (s, m) => !!s && s.slice(0, 7) === m;
+  const daysInMonth = (m) => new Date(+m.slice(0, 4), +m.slice(5, 7), 0).getDate();
+  const nextMonth = (m) => (+m.slice(5, 7) === 12 ? `${+m.slice(0, 4) + 1}-01` : `${m.slice(0, 4)}-${pad(+m.slice(5, 7) + 1)}`);
+  // месяцы периода: от июля 2026 (или раньше, если есть такие даты) до последнего месяца с данными или текущего
+  function periodMonths() {
+    let a = BASE_FROM, b = BASE_TO < TODAY.slice(0, 7) ? TODAY.slice(0, 7) : BASE_TO;
+    const see = (d) => { if (!d) return; const k = d.slice(0, 7); if (k < a) a = k; if (k > b) b = k; };
+    for (const r of db.requests) { see(r.from); see(r.to); }
+    for (const v of db.vehicles) for (const x of v.schedule) see(x.d);
+    const out = [];
+    for (let k = a; k <= b; k = nextMonth(k)) out.push(k);
+    return out;
+  }
+  // название месяца; год пишем, только если он не текущий
+  const monthLabel = (m) => MONTHS[+m.slice(5, 7) - 1] + (m.slice(0, 4) !== TODAY.slice(0, 4) ? ` ${m.slice(0, 4)}` : "");
+  const monthShort = (m) => MONTHS_SHORT[+m.slice(5, 7) - 1] + (m.slice(0, 4) !== TODAY.slice(0, 4) ? ` ${m.slice(2, 4)}` : "");
+  function periodText() {
+    const pm = periodMonths(), f = pm[0], l = pm[pm.length - 1], lo = (m) => MONTHS[+m.slice(5, 7) - 1].toLowerCase();
+    return f.slice(0, 4) === l.slice(0, 4) ? `${lo(f)}–${lo(l)} ${f.slice(0, 4)}` : `${lo(f)} ${f.slice(0, 4)} – ${lo(l)} ${l.slice(0, 4)}`;
+  }
+  const monthOptions = (cur) => periodMonths().map((m) => `<option value="${m}" ${m === cur ? "selected" : ""}>${monthLabel(m)}</option>`).join("");
+  const curMonth = () => { const pm = periodMonths(), t = TODAY.slice(0, 7); return pm.includes(t) ? t : t < pm[0] ? pm[0] : pm[pm.length - 1]; };
   const vehCost = (v) => v.schedule.reduce((s, x) => s + (x.cost || 0), 0);
   const vehDue = (v) => vehCost(v) - paidOf(v);
   const vehDaysIn = (v, m) => v.schedule.filter((x) => inMonth(x.d, m)).length;
@@ -235,7 +429,7 @@
     return [...used].sort((a, b) => a[1] - b[1])[0][0];
   }
   const vehGroup = (v) => (v.partner ? "partner" : v.brand.toLowerCase());
-  const fleetMonths = () => PERIOD_MONTHS.filter((m) => db.vehicles.some((v) => vehDaysIn(v, m)));
+  const fleetMonths = () => periodMonths().filter((m) => db.vehicles.some((v) => vehDaysIn(v, m)));
   function fleetMonth() {
     const ms = fleetMonths(), c = curMonth();
     return ms.includes(c) ? c : ms.filter((m) => m <= c).pop() || ms[0] || c;
@@ -274,7 +468,8 @@
   const ui = {
     req: { q: "", customer: "", month: "", status: "all", pay: "all", sort: "no", dir: 1, view: savedReqView() },
     cal: { customer: "", cancelled: false, reanchor: false },
-    fleet: { tab: "list", month: fleetMonth(), group: "all" },
+    fleet: { tab: "list", month: "", group: "all" }, // месяц выставляется после загрузки данных
+    acc: { vid: null, tab: "sheets", month: "", group: "all" }, // учёт водителей: машина, вкладка книги, месяц ("" — весь период), марка
     fin: { tab: "clients", open: new Set() },
     clients: { q: "" },
     dash: { svcDay: TODAY },
@@ -288,6 +483,7 @@
     { id: "requests", title: "Заявки", icon: "clipboard", render: viewRequests, count: () => db.requests.filter((r) => !r.cancelled).length },
     { id: "calendar", title: "График заявок", icon: "calendar", render: viewCalendar, after: calAfter },
     { id: "fleet", title: "Транспорт", icon: "bus", render: viewFleet, after: fleetAfter, count: () => db.vehicles.filter((v) => !v.sold).length },
+    { id: "drivers", title: "Учёт водителей", icon: "wheel", render: viewAcc, count: () => accVehicles().length },
     { id: "finance", title: "Взаиморасчёты", icon: "wallet", render: viewFinance },
     { id: "clients", title: "Заказчики", icon: "users", render: viewClients, count: () => customers().length },
     { id: "settings", title: "Настройки", icon: "sliders", render: viewSettings },
@@ -304,8 +500,8 @@
 
   function renderNav() {
     const { view } = currentView();
-    $("#nav").innerHTML = `<div class="nav-label">Работа</div>` + VIEWS.map((v, i) =>
-      (i === 4 ? `<div class="nav-label">Финансы и база</div>` : "") +
+    $("#nav").innerHTML = `<div class="nav-label">Работа</div>` + VIEWS.map((v) =>
+      (v.id === "finance" ? `<div class="nav-label">Финансы и база</div>` : "") +
       `<a href="#/${v.id}" class="${v.id === view.id ? "active" : ""}">${icon(v.icon)}<span>${v.title}</span>${v.count ? `<span class="count">${v.count()}</span>` : ""}</a>`
     ).join("");
   }
@@ -363,7 +559,7 @@
       <div class="page-head">
         <div>
           <h2>Сегодня, ${DOW_LONG[td.getDay()]} ${td.getDate()} ${MONTHS_GEN[td.getMonth()]}</h2>
-          <p>Сводка по заявкам и автопарку за июль–декабрь ${YEAR}</p>
+          <p>Сводка по заявкам и автопарку за ${periodText()}</p>
         </div>
         <div class="spacer"></div>
         <a class="btn" href="#/calendar">${icon("calendar")}График</a>
@@ -385,7 +581,7 @@
               <div class="today-item" data-open-request="${r.id}">
                 <div>
                   <div style="font-weight:600">${esc(r.customer)}</div>
-                  <div class="small muted">№${r.no}${r.group ? " · " + esc(r.group) : ""}${r.pax ? ` · ${r.pax} чел.` : ""}</div>
+                  <div class="small muted">№${r.no}${r.group ? " · " + esc(r.group) : ""}${paxOf(r) ? ` · ${esc(paxOf(r))} чел.` : ""}</div>
                 </div>
                 <div class="today-route" title="${esc(expandRoute(day && day.route))}">${icon("pin")}${esc((day && day.route) || "—")}
                   <span class="small muted" style="font-weight:500">день ${day ? day.n : "—"}/${reqDays(r)}</span></div>
@@ -404,7 +600,7 @@
                   <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.customer)}</div>
                   <div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(routeSummary(r.days) || "маршрут не указан")}</div>
                 </div>
-                <div class="small muted nowrap">${r.pax ? r.pax + " чел." : ""}</div>
+                <div class="small muted nowrap">${paxOf(r) ? esc(paxOf(r)) + " чел." : ""}</div>
               </div>`).join("") : `<div class="empty">В ближайшую неделю заездов нет</div>`}
           </div>
         </section>
@@ -465,7 +661,7 @@
       .map((v) => ({ v, days: vehDaysIn(v, m) }))
       .sort((a, b) => b.days - a.days).slice(0, 8);
     return `<section class="card">
-      <div class="card-h"><h2>Загрузка автопарка · ${MONTHS[m - 1].toLowerCase()}</h2>${m !== curMonth() ? '<span class="sub">последний заполненный месяц</span>' : ""}<div class="spacer"></div><a class="small" href="#/fleet">Весь транспорт</a></div>
+      <div class="card-h"><h2>Загрузка автопарка · ${monthLabel(m).toLowerCase()}</h2>${m !== curMonth() ? '<span class="sub">последний заполненный месяц</span>' : ""}<div class="spacer"></div><a class="small" href="#/fleet">Весь транспорт</a></div>
       <div class="card-b">
         ${rows.map(({ v, days }) => `<div class="hbar-row" data-open-vehicle="${v.id}" style="cursor:pointer" data-tip="<b>${esc(vehTitle(v))}</b><br>${days} из ${dim} дней в работе">
           <div class="name">${vdot(v)}${esc(vehTitle(v))}</div>
@@ -475,7 +671,9 @@
   }
 
   function monthChart() {
-    const vals = PERIOD_MONTHS.map((m) => {
+    // не больше 12 месяцев: последние до текущего (минимум первые 6)
+    const pm = periodMonths(), end = Math.max(pm.indexOf(curMonth()) + 1, Math.min(pm.length, 6));
+    const vals = pm.slice(Math.max(0, end - 12), end).map((m) => {
       const rs = db.requests.filter((r) => inMonth(r.from, m));
       return { m, sum: rs.reduce((s, r) => s + (r.total || 0), 0), n: rs.filter((r) => !r.cancelled).length };
     });
@@ -491,11 +689,11 @@
         const cx = L + step * i + step / 2, top = y(v.sum), h = y(0) - top;
         const r = Math.min(4, h);
         const path = h > 0 ? `M${cx - bw / 2},${y(0)} V${top + r} Q${cx - bw / 2},${top} ${cx - bw / 2 + r},${top} H${cx + bw / 2 - r} Q${cx + bw / 2},${top} ${cx + bw / 2},${top + r} V${y(0)} Z` : "";
-        return `<g class="col" data-tip="<b>${MONTHS[v.m - 1]}</b><br>${fmtUsd(v.sum)} · ${v.n} ${plural(v.n, "заявка", "заявки", "заявок")}">
+        return `<g class="col" data-tip="<b>${monthLabel(v.m)}</b><br>${fmtUsd(v.sum)} · ${v.n} ${plural(v.n, "заявка", "заявки", "заявок")}">
           <rect class="bar-hit" x="${cx - step / 2}" y="${T}" width="${step}" height="${H - T - B}"/>
           <path class="bar" d="${path}"/>
           ${v.sum ? `<text class="val" x="${cx}" y="${top - 7}" text-anchor="middle">${fmtNum(v.sum / 1000)}K</text>` : ""}
-          <text x="${cx}" y="${H - 6}" text-anchor="middle">${MONTHS_SHORT[v.m - 1]}</text></g>`;
+          <text x="${cx}" y="${H - 6}" text-anchor="middle">${monthShort(v.m)}</text></g>`;
       }).join("")}
       <line class="axis" x1="${L}" x2="${W}" y1="${y(0)}" y2="${y(0)}"/>
     </svg></div>`;
@@ -520,7 +718,7 @@
     const f = ui.req, q = f.q.trim().toLowerCase();
     let list = db.requests.filter((r) => {
       if (f.customer && r.customer !== f.customer) return false;
-      if (f.month && !inMonth(r.from, +f.month)) return false;
+      if (f.month && !inMonth(r.from, f.month)) return false;
       if (f.status !== "all" && reqStatus(r) !== f.status) return false;
       if (f.pay !== "all") {
         const p = payStatus(r);
@@ -540,7 +738,7 @@
 
   function viewRequests() {
     const f = ui.req;
-    const base = db.requests.filter((r) => (!f.customer || r.customer === f.customer) && (!f.month || inMonth(r.from, +f.month)));
+    const base = db.requests.filter((r) => (!f.customer || r.customer === f.customer) && (!f.month || inMonth(r.from, f.month)));
     const cnt = (st) => base.filter((r) => st === "all" || reqStatus(r) === st).length;
     const list = filteredRequests();
     const names = [...new Set(db.requests.map((r) => r.customer))].sort((a, b) => a.localeCompare(b, "ru"));
@@ -549,7 +747,7 @@
       <div class="toolbar">
         <input class="input search-inline" type="search" placeholder="Поиск по заявкам…" value="${esc(f.q)}" data-filter="q">
         <select class="input" data-filter="customer"><option value="">Все заказчики</option>${names.map((n) => `<option ${n === f.customer ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
-        <select class="input" data-filter="month"><option value="">Все месяцы</option>${PERIOD_MONTHS.map((m) => `<option value="${m}" ${String(m) === String(f.month) ? "selected" : ""}>${MONTHS[m - 1]}</option>`).join("")}</select>
+        <select class="input" data-filter="month"><option value="">Все месяцы</option>${monthOptions(f.month)}</select>
         <select class="input" data-filter="pay">
           ${[["all", "Любая оплата"], ["debt", "Есть долг"], ["paid", "Оплачено"], ["over", "Переплата"]].map(([v, l]) => `<option value="${v}" ${f.pay === v ? "selected" : ""}>${l}</option>`).join("")}
         </select>
@@ -595,7 +793,7 @@
               <td><div class="cell-main">${esc(r.customer)}</div><div class="cell-sub">${esc([r.group, r.country].filter(Boolean).join(" · ") || "—")}</div></td>
               <td class="nowrap"><div class="${st === "cancelled" ? "strike" : ""}">${fmtRange(r.from, r.to)}</div><div class="cell-sub">${reqDays(r)} ${plural(reqDays(r), "день", "дня", "дней")}</div></td>
               <td><div class="route-line" title="${esc(routeSummary(r.days))}">${esc(routeSummary(r.days) || "—")}</div></td>
-              <td class="r num">${r.pax || "—"}</td>
+              <td class="r num">${esc(paxOf(r)) || "—"}</td>
               <td class="nowrap">${esc(r.transport || "—")}</td>
               <td>${e ? `<div>${esc(e.name)}</div>${e.phone ? `<div class="cell-sub num nowrap">${e.phone}</div>` : ""}` : '<span class="muted">—</span>'}</td>
               <td class="r num nowrap" style="font-weight:600">${fmtUsd(r.total || 0)}</td>
@@ -655,7 +853,7 @@
               <td class="sk sk1 num">${r.no}</td>
               <td class="sk sk2"><div class="cust">${esc(r.customer)}</div><span class="badge ${st}">${STATUS[st]}</span></td>
               <td class="c">${esc(r.transport || "—")}</td>
-              <td class="c num">${r.pax || "—"}</td>
+              <td class="c num">${esc(paxOf(r)) || "—"}</td>
               <td class="c num nowrap">${fmtDate(r.from)}</td>
               <td class="c num nowrap">${fmtDate(r.to)}</td>
               <td class="c">${esc(r.country || "—")}</td>
@@ -705,7 +903,7 @@
           ${info("№ группы", esc(r.group || "—"))}
           ${info("Страна / группа", esc(r.country || "—"))}
           ${info("Даты", `${fmtRange(r.from, r.to)} ${r.to ? parseISO(r.to).getFullYear() : ""} · ${reqDays(r)} ${plural(reqDays(r), "день", "дня", "дней")}`)}
-          ${info("Туристов", r.pax || "—")}
+          ${info("Туристов", esc(paxOf(r)) || "—")}
           ${info("Транспорт", esc(r.transport ? (/^\d/.test(r.transport) ? r.transport + " мест" : r.transport) : "—"))}
           ${info("Сопровождающий", e ? `${esc(e.name)}${e.phone ? `<br><a class="num" href="tel:${e.tel}">${e.phone}</a>` : ""}` : "—")}
           ${info("Курс / НДС", `${fmtNum(r.rate)} сум · ${r.vat}%`)}
@@ -773,7 +971,7 @@
             ${f("customer", "Заказчик *", src.customer, 'list="dl-customers" required autocomplete="off"', "span2")}
             ${f("group", "№ группы", src.group)}
             ${f("country", "Страна", src.country)}
-            ${f("pax", "Туристов", src.pax, 'type="number" min="0"')}
+            ${f("pax", "Туристов", paxOf(src), 'inputmode="numeric" placeholder="20 или 12+1"')}
             ${f("transport", "Транспорт", src.transport, 'list="dl-transport" autocomplete="off"')}
             ${f("escort", "Сопровождающий (имя и телефон)", src.escort, 'placeholder="Шохрух 913174732"', "span2")}
             ${f("from", "Дата заезда *", src.from, 'type="date" required')}
@@ -870,7 +1068,7 @@
       ...(x.color != null && { color: x.color }),
     })).filter((d) => d.route || d.svc.length || d.cost || d.color != null);
     const fields = {
-      customer: v("customer"), group: v("group") || null, country: v("country") || null, pax: +v("pax") || null,
+      customer: v("customer"), group: v("group") || null, country: v("country") || null, ...parsePax(v("pax")),
       transport: v("transport") || null, escort: v("escort") || null, from: v("from"), to: v("to"),
       rate: +v("rate") || db.settings.rate, vat: v("vat") === "" ? db.settings.vat : +v("vat"),
       days, total: days.reduce((s, d) => s + d.cost, 0),
@@ -878,7 +1076,7 @@
     let r;
     if (modal.id) {
       r = reqById(modal.id);
-      const labels = { customer: "заказчик", group: "№ группы", country: "страна", pax: "туристы", transport: "транспорт", escort: "сопровождающий", from: "даты", to: "даты", rate: "курс", vat: "НДС" };
+      const labels = { customer: "заказчик", group: "№ группы", country: "страна", pax: "туристы", paxText: "туристы", transport: "транспорт", escort: "сопровождающий", from: "даты", to: "даты", rate: "курс", vat: "НДС" };
       const changed = new Set(Object.keys(labels).filter((k) => String(r[k] ?? "") !== String(fields[k] ?? "")).map((k) => labels[k]));
       if (JSON.stringify(r.days) !== JSON.stringify(days)) changed.add("программа");
       Object.assign(r, fields);
@@ -1036,13 +1234,12 @@
   }
 
   /* ================= Ленты по дням (график заявок и транспорта) ================= */
-  // лента не делится на месяцы: минимум июль–декабрь, а если есть даты раньше или позже — расширяется под них
-  const PERIOD_START = `${YEAR}-${pad(PERIOD_MONTHS[0])}-01`;
-  const PERIOD_END = `${YEAR}-${pad(PERIOD_MONTHS[PERIOD_MONTHS.length - 1])}-${pad(daysInMonth(PERIOD_MONTHS[PERIOD_MONTHS.length - 1]))}`;
+  // лента не делится на месяцы: весь период (см. periodMonths), а если есть даты раньше или позже — расширяется под них
   const ribbons = {}; // ключ ленты -> диапазон, нарисованный последним
 
   function ribbonRange(ds) {
-    let a = PERIOD_START, b = PERIOD_END;
+    const pm = periodMonths(), lm = pm[pm.length - 1];
+    let a = `${pm[0]}-01`, b = `${lm}-${pad(daysInMonth(lm))}`;
     for (const d of ds) {
       if (!d) continue;
       if (d < a) a = d;
@@ -1066,8 +1263,9 @@
     const f = rg.months[0], l = rg.months[rg.months.length - 1];
     return f.y === l.y ? `${MONTHS[f.m - 1]} – ${MONTHS[l.m - 1].toLowerCase()} ${f.y}` : `${MONTHS[f.m - 1]} ${f.y} – ${MONTHS[l.m - 1].toLowerCase()} ${l.y}`;
   }
-  const dayCell = (route, svc) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) =>
-    `<span class="sl">${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`).join("")}`;
+  // клетка ленты: маршрут, услуги со временем, внизу — цена за день
+  const dayCell = (route, svc, cost) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) =>
+    `<span class="sl">${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`).join("")}${cost ? `<span class="pr">${fmtUsd(cost)}</span>` : ""}`;
   // ширины колонок заданы заранее (table-layout: fixed), чтобы не зависели от текста и загрузки шрифта
   function ribbonHead(rg, label) {
     return `<colgroup><col class="c-rowh">${'<col class="c-day">'.repeat(rg.dates.length)}</colgroup>
@@ -1081,7 +1279,7 @@
   }
   // кнопки месяцев только прокручивают ленту
   function ribbonNav(key, rg) {
-    return `<div class="seg">${rg.months.map((x) => `<button data-action="rb-jump" data-key="${key}" data-ym="${x.ym}">${MONTHS[x.m - 1]}${x.y !== YEAR ? ` ${x.y}` : ""}</button>`).join("")}</div>
+    return `<div class="seg">${rg.months.map((x) => `<button data-action="rb-jump" data-key="${key}" data-ym="${x.ym}">${monthLabel(x.ym)}</button>`).join("")}</div>
       ${TODAY >= rg.start && TODAY <= rg.end ? `<button class="btn" data-action="rb-today" data-key="${key}">${icon("calendar")}Сегодня</button>` : ""}`;
   }
 
@@ -1144,7 +1342,7 @@
           <tbody>${rows.map((r) => {
             const byDate = new Map(r.days.map((d) => [d.d, d]));
             const to = r.to || r.from;
-            return `<tr class="vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}" data-from="${r.from}" data-to="${to}" data-cell="req" data-id="${r.id}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, r.pax && r.pax + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
+            return `<tr class="vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}" data-from="${r.from}" data-to="${to}" data-cell="req" data-id="${r.id}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, paxOf(r) && paxOf(r) + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
               ${rg.dates.map((d, i) => {
                 if (d < r.from || d > to) return `<td class="tday ${rg.colCls[i]}"></td>`;
                 const x = byDate.get(d);
@@ -1152,7 +1350,7 @@
                 const moving = x && x.route && x.route.includes("-");
                 // аннулированная заявка не редактируется по клеткам — открывается карточка
                 const tn = tint(x);
-                return `<td class="tday on ${r.cancelled ? "" : "ed"} ${tn.cls} ${rg.colCls[i]}" ${tn.style} ${r.cancelled ? `data-open-request="${r.id}"` : ""} title="${esc(tip)}"><div class="cellbar ${r.cancelled ? "cx" : moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc)}</div></td>`;
+                return `<td class="tday on ${r.cancelled ? "" : "ed"} ${tn.cls} ${rg.colCls[i]}" ${tn.style} ${r.cancelled ? `data-open-request="${r.id}"` : ""} title="${esc(tip)}"><div class="cellbar ${r.cancelled ? "cx" : moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc, x && x.cost)}</div></td>`;
               }).join("")}</tr>`;
           }).join("")}</tbody></table>` : `<div class="empty">Заявок не найдено</div>`}
         </div>
@@ -1173,6 +1371,9 @@
   }
 
   /* ================= Транспорт ================= */
+  const fleetTabs = () => `<div class="seg">${[["list", "Список"], ["chart", "График по дням"]].map(([v, l]) =>
+    `<button class="${ui.fleet.tab === v ? "on" : ""}" data-action="fleet-tab" data-v="${v}">${l}</button>`).join("")}</div>`;
+
   function viewFleet() {
     const f = ui.fleet, m = f.month, dim = daysInMonth(m);
     const all = db.vehicles;
@@ -1190,24 +1391,23 @@
       <div class="grid kpis">
         ${kpi("Единиц транспорта", active.length, `${own.length} ${plural(own.length, "автобус", "автобуса", "автобусов")} · ${active.length - own.length} частных`)}
         ${kpi("В рейсе сегодня", onRoute.length, `свободно ${active.length - onRoute.length}`)}
-        ${kpi(`Загрузка · ${MONTHS[m - 1].toLowerCase()}`, Math.round(avg * 100) + "%", "в среднем по автобусам")}
-        ${kpi("Начислено перевозчикам", money(totalCost), "июль–декабрь")}
+        ${kpi(`Загрузка · ${monthLabel(m).toLowerCase()}`, Math.round(avg * 100) + "%", "в среднем по автобусам")}
+        ${kpi("Начислено перевозчикам", money(totalCost), periodText())}
         ${kpi("Остаток к оплате", money(totalDue), `выплачено ${fmtUsd(all.reduce((x, v) => x + paidOf(v), 0))}`)}
       </div>
       <div class="toolbar">
-        <div class="seg"><button class="${f.tab === "list" ? "on" : ""}" data-action="fleet-tab" data-v="list">Список</button><button class="${f.tab === "chart" ? "on" : ""}" data-action="fleet-tab" data-v="chart">График по дням</button></div>
+        ${fleetTabs()}
         <div class="seg">${groups.map(([v, l]) => `<button class="${f.group === v ? "on" : ""}" data-action="fleet-group" data-v="${v}">${l}<span class="c">${all.filter((x) => v === "all" || vehGroup(x) === v).length}</span></button>`).join("")}</div>
         <div class="grow"></div>
         ${f.tab === "chart" ? ribbonNav("fleet", rg)
-          : `<select class="input" data-fleet="month">${PERIOD_MONTHS.map((x) => `<option value="${x}" ${x === m ? "selected" : ""}>${MONTHS[x - 1]}</option>`).join("")}</select>`}
+          : `<select class="input" data-fleet="month">${monthOptions(m)}</select>`}
       </div>
-      ${fleetMonths().length < PERIOD_MONTHS.length ? `<div class="note-box" style="margin:0 0 14px;display:flex;gap:8px;align-items:center">${icon("alert")}<span>В Excel транспортный график заполнен только за: ${fleetMonths().map((x) => MONTHS[x - 1].toLowerCase()).join(", ") || "—"}. Остальные месяцы появятся после обновления файла.</span></div>` : ""}
       ${f.tab === "list" ? fleetTable(list, m, dim) : fleetChart(list, rg)}`;
   }
 
   function fleetTable(list, m, dim) {
     return `<div class="card"><div class="table-wrap"><table class="t">
-      <thead><tr><th>№</th><th>Транспорт</th><th>Сегодня</th><th class="r">Дней в работе</th><th>Загрузка · ${MONTHS_SHORT[m - 1]}</th><th class="r">Начислено</th><th class="r">Оплачено</th><th class="r">Остаток</th></tr></thead>
+      <thead><tr><th>№</th><th>Транспорт</th><th>Сегодня</th><th class="r">Дней в работе</th><th>Загрузка · ${monthShort(m)}</th><th class="r">Начислено</th><th class="r">Оплачено</th><th class="r">Остаток</th></tr></thead>
       <tbody>${list.map((v) => {
         const t = vehOn(v, TODAY), d = vehDaysIn(v, m), due = vehDue(v);
         return `<tr class="clickable ${v.sold ? "cancelled" : ""}" data-open-vehicle="${v.id}">
@@ -1242,7 +1442,7 @@
             const moving = x.route && x.route.includes("-");
             const tip = `${vehTitle(v)}\n${fmtDateLong(d)}\n${x.route ? expandRoute(x.route) : "—"}${x.svc.length ? "\n" + svcText(x.svc) : ""}${x.cost ? "\n" + fmtUsd(x.cost) : ""}\n\nНажмите, чтобы изменить`;
             const tn = tint(x);
-            return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc)}</div></td>`;
+            return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc, x.cost)}</div></td>`;
           }).join("")}</tr>`;
       }).join("")}</tbody></table></div></div>`;
   }
@@ -1252,19 +1452,379 @@
     if (!restored.has("fleet")) {
       // если сегодня есть рейсы — к сегодняшнему дню, иначе к началу последнего заполненного месяца
       const m = fleetMonth();
-      ribbonScrollTo("fleet", TODAY.slice(0, 7) === `${YEAR}-${pad(m)}` ? ribbonTodayAnchor("fleet") : `${YEAR}-${pad(m)}-01`);
+      ribbonScrollTo("fleet", TODAY.slice(0, 7) === m ? ribbonTodayAnchor("fleet") : `${m}-01`);
     }
     updateRibbonMonth("fleet");
   }
 
+  /* ================= Учёт водителей (как в Excel-книге водителя) ================= */
+  // Книга водителя: маршрутные листы с расходами по дням, итоговый отчёт, топливо, запчасти, зарплата и прибыль.
+  // Расходы дня хранятся в дне графика машины (hotel, food, car — сум; kom — USD; co — компания; split — новый лист),
+  // остальное — в v.acc: шапки листов (по дате внутри листа), заправки, запчасти, выплаты.
+  const ACC0 = { sheets: {}, fuel: [], parts: [], pay: [] };
+  const accGet = (v) => v.acc || ACC0;
+  const accOf = (v) => v.acc || (v.acc = structuredClone(ACC0));
+  const accNorm = () => ({ food: 120000, hotel: 70000, kom: 22, ...db.settings.acc });
+  const accVehicles = () => db.vehicles.filter((v) => !v.partner && (!v.sold || v.schedule.length));
+  const PAYK = { salary: "Зарплата на карту", ndfl: "НДФЛ", kom: "Ком. наличными" };
+  const ACC_TEXT = new Set(["co", "group", "drivers", "name", "who", "note", "d", "m", "kind"]);
+  const numIn = (n) => (n == null || n === "" ? "" : (+n).toLocaleString("ru-RU", { maximumFractionDigits: 2 }));
+  const parseNum = (s) => { const n = parseFloat(String(s).replace(/[\s  ]/g, "").replace(",", ".")); return Number.isFinite(n) ? n : null; };
+  const usdOf = (uzs, rate) => (rate ? uzs / rate : 0);
+  const nightAway = (route) => { const p = (route || "").split(/\s*-\s*/).pop().trim(); return !!p && !/^сам/i.test(p); };
+
+  // клетка-поле книги: правка сразу сохраняется (см. accSet)
+  function ain(key, val, { ph = "", txt = false, col = "", type = "", box = false } = {}) {
+    const cls = `ai${txt ? " txt" : type ? "" : " num"}${box ? " box" : ""}`;
+    if (type) return `<input class="${cls}" type="${type}" data-acc="${key}" value="${esc(val || "")}">`;
+    return `<input class="${cls}" data-acc="${key}"${col ? ` data-col="${col}"` : ""} value="${esc(txt ? val || "" : numIn(val))}" placeholder="${esc(ph)}"${txt ? "" : ' inputmode="decimal"'} autocomplete="off">`;
+  }
+  const delBtn = (list, i) => `<button class="btn icon sm ghost" data-action="acc-del" data-list="${list}" data-i="${i}" aria-label="Удалить строку">${icon("trash")}</button>`;
+  const usdTd = (n, cls = "") => `<td class="r num ${cls}">${Math.abs(n) < 0.5 ? '<span class="muted">—</span>' : fmtUsd(n)}</td>`;
+  const uzsTd = (n) => `<td class="r num">${n ? fmtNum(n) : '<span class="muted">—</span>'}</td>`;
+
+  // заявки, с которыми совпадает день машины (та же дата и маршрут) — подсказки для компании и группы
+  function reqIndex() {
+    const m = new Map();
+    for (const r of db.requests) if (!r.cancelled) for (const y of r.days) if (y.d && y.route) {
+      const k = `${y.d}|${y.route}`;
+      (m.get(k) || m.set(k, []).get(k)).push(r);
+    }
+    return m;
+  }
+  const dayReqs = (x, idx) => idx.get(`${x.d}|${x.route}`) || [];
+  const dayCompany = (x, idx) => { const cs = [...new Set(dayReqs(x, idx).map((r) => r.customer))]; return cs.length === 1 ? cs[0] : ""; };
+  function sheetSuggest(s, idx) {
+    const rs = [...new Set(s.days.flatMap((x) => { const l = dayReqs(x, idx); return l.length === 1 ? l : []; }))];
+    return {
+      group: rs.slice(0, 3).map((r) => [`№${r.no}`, r.group, r.country].filter(Boolean).join(" ")).join("; "),
+      pax: rs.length ? Math.max(...rs.map((r) => r.pax || 0)) || "" : "",
+    };
+  }
+
+  // маршрутные листы: подряд идущие дни графика; новый лист — после перерыва или с дня, отмеченного «новый лист»
+  function routeSheets(v) {
+    const runs = [];
+    for (const x of [...v.schedule].sort((a, b) => a.d.localeCompare(b.d))) {
+      const cur = runs[runs.length - 1];
+      if (cur && !x.split && cur[cur.length - 1].d === addDays(x.d, -1)) cur.push(x);
+      else runs.push([x]);
+    }
+    const meta = accGet(v).sheets;
+    return runs.map((days, i) => {
+      const from = days[0].d, to = days[days.length - 1].d;
+      const key = Object.keys(meta).sort().find((k) => k >= from && k <= to) || from;
+      const M = meta[key] || {}, rate = M.rate || db.settings.rate;
+      const sum = (f) => days.reduce((t, x) => t + (+x[f] || 0), 0);
+      const s = { no: i + 1, key, from, to, days, meta: M, rate, hotel: sum("hotel"), food: sum("food"), car: sum("car"), kom: sum("kom"), cost: sum("cost") };
+      s.drv = usdOf(s.hotel + s.food, rate);
+      s.carUsd = usdOf(s.car, rate);
+      s.exp = s.drv + s.carUsd + s.kom;
+      s.net = s.cost - s.exp;
+      return s;
+    });
+  }
+  function fuelRows(v) {
+    let prevOdo = null, prevCan = 0;
+    return accGet(v).fuel.map((f, i) => {
+      const fill = +f.fill || 0, can = +f.can || 0, total = fill + can, uzs = total * (+f.price || 0);
+      const km = f.odo != null && prevOdo != null ? f.odo - prevOdo : null;
+      // как в Excel: расход за пробег = заправка + канистра, купленная при прошлой заправке
+      const used = fill + prevCan;
+      if (f.odo != null) prevOdo = f.odo;
+      prevCan = can;
+      return { f, i, km, total, used, uzs, usd: usdOf(uzs, f.rate) };
+    });
+  }
+  const partRows = (v) => accGet(v).parts.map((p, i) => { const uzs = (+p.qty || 0) * (+p.price || 0); return { p, i, uzs, usd: usdOf(uzs, p.rate) }; });
+  const payUsd = (p) => +p.usd || 0;
+
+  // итоги книги за период: m = 0 — всё время
+  function accCalc(v, m) {
+    const inM = (d) => !m || (d && inMonth(d, m));
+    const sheets = routeSheets(v).filter((s) => inM(s.from));
+    const fuel = fuelRows(v).filter((r) => inM(r.f.d)), parts = partRows(v).filter((r) => inM(r.p.d));
+    const pay = accGet(v).pay.filter((p) => !m || p.m === m);
+    const S = (list, fn) => list.reduce((t, x) => t + (fn(x) || 0), 0);
+    const c = {
+      sheets, days: S(sheets, (s) => s.days.length),
+      income: S(sheets, (s) => s.cost), drv: S(sheets, (s) => s.drv), car: S(sheets, (s) => s.carUsd), kom: S(sheets, (s) => s.kom),
+      ndfl: S(pay.filter((p) => p.kind === "ndfl"), payUsd), card: S(pay.filter((p) => p.kind === "salary"), payUsd),
+      komPaid: S(pay.filter((p) => p.kind === "kom"), payUsd), fuel: S(fuel, (r) => r.usd), parts: S(parts, (r) => r.usd),
+    };
+    c.profit = c.income - c.drv - c.car - c.kom - c.ndfl - c.fuel - c.parts;
+    c.komLeft = c.kom - c.card - c.komPaid;
+    return c;
+  }
+
+  function viewAcc() {
+    const v = ui.acc.vid && vehById(ui.acc.vid);
+    return v ? accDriver(v, ui.acc.month) : accSummary(ui.acc.month);
+  }
+  const accMonthSel = (m) => `<select class="input" data-accf="month" aria-label="Период"><option value="">Весь период</option>${monthOptions(m)}</select>`;
+  const periodLabel = (m) => (m ? monthLabel(m).toLowerCase() : "весь период");
+  const accKpis = (c) => `<div class="grid kpis">
+    ${kpi("Приход", money(c.income), `${c.sheets.length} ${plural(c.sheets.length, "маршрутный лист", "маршрутных листа", "маршрутных листов")} · ${c.days} дн.`)}
+    ${kpi("Расходы на маршрут", money(c.drv + c.car + c.kom), "питание, жильё, машина, командировочные")}
+    ${kpi("Топливо и запчасти", money(c.fuel + c.parts), `топливо ${fmtUsd(c.fuel)} · запчасти ${fmtUsd(c.parts)}`)}
+    ${kpi("Чистая прибыль", money(c.profit), c.income ? `${Math.round((c.profit / c.income) * 100)}% от прихода, после НДФЛ` : "после НДФЛ, топлива и запчастей")}
+    ${kpi(c.komLeft < -0.5 ? "Командировочные: выдано больше" : "Командировочные к выплате", money(Math.abs(c.komLeft)), `начислено ${fmtUsd(c.kom)} · выдано ${fmtUsd(c.card + c.komPaid)}`)}
+  </div>`;
+
+  function accSummary(m) {
+    const g = ui.acc.group;
+    const groups = [["all", "Все"], ["asiastar", "ASIASTAR"], ["eurise", "EURISE"]];
+    const rows = accVehicles().filter((v) => g === "all" || vehGroup(v) === g).map((v) => ({ v, c: accCalc(v, m) }));
+    const T = (fn) => rows.reduce((s, r) => s + fn(r.c), 0);
+    const total = {
+      sheets: { length: T((c) => c.sheets.length) }, days: T((c) => c.days), income: T((c) => c.income), drv: T((c) => c.drv), car: T((c) => c.car),
+      kom: T((c) => c.kom), ndfl: T((c) => c.ndfl), card: T((c) => c.card), komPaid: T((c) => c.komPaid), fuel: T((c) => c.fuel), parts: T((c) => c.parts),
+      profit: T((c) => c.profit), komLeft: T((c) => c.komLeft),
+    };
+    const cells = (c) => `${usdTd(c.income)}${usdTd(c.drv)}${usdTd(c.car)}${usdTd(c.kom)}${usdTd(c.ndfl)}${usdTd(c.fuel)}${usdTd(c.parts)}
+      ${usdTd(c.profit, c.profit < -0.5 ? "strong neg" : "strong")}${usdTd(c.komLeft)}`;
+    return `${accKpis(total)}
+      <div class="toolbar">
+        <div class="seg">${groups.map(([v, l]) => `<button class="${g === v ? "on" : ""}" data-action="acc-group" data-v="${v}">${l}</button>`).join("")}</div>
+        <div class="grow"></div>${accMonthSel(m)}</div>
+      <div class="card"><div class="card-h wrap"><h2>Итоговый отчёт по водителям</h2><span class="sub">${periodLabel(m)} · USD</span><div class="spacer"></div>
+        <span class="small muted">Нажмите на строку — откроется книга водителя: маршрутные листы, топливо, запчасти, зарплата</span></div>
+      <div class="table-wrap"><table class="t acc-t">
+        <thead><tr><th>№</th><th>Транспорт / водитель</th><th class="r">Листов</th><th class="r">Дней</th><th class="r">Приход</th><th class="r">Рас. вод.</th><th class="r">Машина</th>
+          <th class="r">Ком. вод.</th><th class="r">НДФЛ</th><th class="r">Топливо</th><th class="r">Запчасти</th><th class="r">Прибыль</th><th class="r">Ком. к выплате</th></tr></thead>
+        <tbody>${rows.map(({ v, c }) => `<tr class="clickable ${v.sold ? "cancelled" : ""}" data-action="acc-open" data-id="${v.id}">
+          <td class="num muted">${v.no}</td>
+          <td><div class="cell-main">${vdot(v)}${esc(vehTitle(v))}</div><div class="cell-sub">${esc(vehSub(v))}</div></td>
+          <td class="r num">${c.sheets.length || '<span class="muted">—</span>'}</td><td class="r num">${c.days || '<span class="muted">—</span>'}</td>${cells(c)}</tr>`).join("")}</tbody>
+        <tfoot><tr><td colspan="2">Итого: ${rows.length}</td><td class="r num">${total.sheets.length}</td><td class="r num">${total.days}</td>${cells(total)}</tr></tfoot>
+      </table></div></div>`;
+  }
+
+  function accDriver(v, m) {
+    const c = accCalc(v, m), tab = ui.acc.tab;
+    const tabs = [["sheets", "Маршрутные листы"], ["report", "Итоговый отчёт"], ["fuel", "Топливо"], ["parts", "Запчасти"], ["pay", "Зарплата и ком."], ["total", "Отчёт · прибыль"]];
+    const body = { sheets: accSheetsTab, report: accReportTab, fuel: accFuelTab, parts: accPartsTab, pay: accPayTab, total: accTotalTab }[tab](v, m, c);
+    return `${accKpis(c)}
+      <div class="toolbar">
+        <button class="btn" data-action="acc-back">${icon("chevronLeft")}Все водители</button>
+        <select class="input" data-accf="vid" aria-label="Водитель">${accVehicles().map((x) => `<option value="${x.id}" ${x === v ? "selected" : ""}>${esc(vehTitle(x))}${x.driver ? " · " + esc(x.driver) : ""}${x.sold ? " (продан)" : ""}</option>`).join("")}</select>
+        <div class="grow"></div>${accMonthSel(m)}</div>
+      <div class="toolbar"><div class="seg acc-tabs">${tabs.map(([k, l]) => `<button class="${tab === k ? "on" : ""}" data-action="acc-tab" data-v="${k}">${l}</button>`).join("")}</div></div>
+      ${body}`;
+  }
+
+  function accSheetsTab(v, m) {
+    const all = routeSheets(v), list = all.filter((s) => !m || inMonth(s.from, m));
+    if (!list.length) return `<div class="card"><div class="empty">${all.length ? `За ${periodLabel(m)} маршрутных листов нет` : "Рейсов пока нет — добавьте их в «График по дням»"}</div></div>`;
+    const N = accNorm(), idx = reqIndex();
+    return `<div class="note-box acc-note">${icon("edit")}<span>Маршрутный лист — это подряд идущие дни в графике машины. Суммы вводите прямо в таблицу, Enter — на строку ниже.
+      Серым показана норма из настроек; «Заполнить по норме» подставит её в пустые клетки. ${icon("scissors")} у дня — начать с него новый лист.</span></div>`
+      + list.map((s) => accSheetCard(v, s, all, N, idx)).join("");
+  }
+
+  function accSheetCard(v, s, all, N, idx) {
+    const k = s.key, M = s.meta, prev = all[s.no - 2], sug = sheetSuggest(s, idx);
+    const canMerge = s.days[0].split && prev && prev.to === addDays(s.from, -1);
+    const given = s.hotel + s.food;
+    return `<section class="card acc-sheet" id="acc-s-${k}">
+      <div class="card-h wrap"><h2>Маршрутный лист №${s.no}</h2><span class="sub">${fmtRange(s.from, s.to)} · ${s.days.length} дн.</span><div class="spacer"></div>
+        ${canMerge ? `<button class="btn sm ghost" data-action="acc-merge" data-d="${s.from}">Объединить с листом №${prev.no}</button>` : ""}
+        <button class="btn sm" data-action="acc-norm" data-key="${k}">Заполнить по норме</button>
+        <button class="btn sm" data-action="acc-print" data-key="${k}">${icon("printer")}Печать</button></div>
+      <div class="acc-meta">
+        <label class="field"><span>Водители</span>${ain(`s|${k}|drivers`, M.drivers, { ph: v.driver || "", txt: true, box: true })}</label>
+        <label class="field wide"><span>Гр. / страна</span>${ain(`s|${k}|group`, M.group, { ph: sug.group, txt: true, box: true })}</label>
+        <label class="field"><span>Туристов</span>${ain(`s|${k}|pax`, M.pax, { ph: String(sug.pax), box: true })}</label>
+        <label class="field"><span>Курс USD, сум</span>${ain(`s|${k}|rate`, M.rate, { ph: numIn(db.settings.rate), box: true })}</label>
+      </div>
+      <div class="table-wrap" data-keep-scroll="acc-${k}"><table class="t acc-t acc-days">
+        <thead><tr><th class="c">День</th><th>Дата</th><th>Маршрут</th><th>Программа</th><th class="r">Проживание<small>сум</small></th><th class="r">Питание<small>сум</small></th>
+          <th class="r">Доп. расходы машины<small>сум</small></th><th class="r">Команд. вод.<small>USD</small></th><th class="r">Цена услуг<small>USD</small></th><th>Компания</th></tr></thead>
+        <tbody>${s.days.map((x, i) => `<tr>
+          <td class="c num">${i + 1}${i ? `<button class="acc-split" data-action="acc-split" data-d="${x.d}" title="Начать с этого дня новый маршрутный лист">${icon("scissors")}</button>` : ""}</td>
+          <td class="nw">${fmtDate(x.d)}, ${dow(x.d)}</td>
+          <td><button class="acc-route" data-action="acc-cell" data-d="${x.d}" title="Изменить маршрут и услуги">${esc(expandRoute(x.route) || "—")}</button></td>
+          <td class="prog">${esc(svcText(x.svc)) || '<span class="muted">—</span>'}</td>
+          <td>${ain(`d|${x.d}|hotel`, x.hotel, { ph: nightAway(x.route) ? numIn(N.hotel) : "", col: "hotel" })}</td>
+          <td>${ain(`d|${x.d}|food`, x.food, { ph: numIn(N.food), col: "food" })}</td>
+          <td>${ain(`d|${x.d}|car`, x.car, { col: "car" })}</td>
+          <td>${ain(`d|${x.d}|kom`, x.kom, { ph: numIn(N.kom), col: "kom" })}</td>
+          <td>${ain(`d|${x.d}|cost`, x.cost, { col: "cost" })}</td>
+          <td>${ain(`d|${x.d}|co`, x.co, { ph: dayCompany(x, idx), txt: true, col: "co" })}</td></tr>`).join("")}</tbody>
+        <tfoot><tr><td colspan="4">Итого за маршрут</td><td class="r num">${fmtNum(s.hotel)}</td><td class="r num">${fmtNum(s.food)}</td><td class="r num">${fmtNum(s.car)}</td>
+          <td class="r num">${fmtUsd(s.kom)}</td><td class="r num">${fmtUsd(s.cost)}</td><td></td></tr></tfoot>
+      </table></div>
+      <div class="acc-foot">
+        <span>Дано на расходы водителей <b class="num">${fmtUzs(given)}</b> <span class="muted">(${fmtUsd(s.drv)})</span></span>
+        <span>на расходы машины <b class="num">${fmtUzs(s.car)}</b></span>
+        <span>Расходы всего <b class="num">${fmtUsd(s.exp)}</b></span>
+        <span>Чистый доход <b class="num ${s.net < -0.5 ? "neg" : "ok"}">${fmtUsd(s.net)}</b></span>
+      </div></section>`;
+  }
+
+  function accReportTab(v, m) {
+    const list = routeSheets(v).filter((s) => !m || inMonth(s.from, m)), idx = reqIndex();
+    if (!list.length) return `<div class="card"><div class="empty">За ${periodLabel(m)} маршрутных листов нет</div></div>`;
+    const T = (f) => list.reduce((t, s) => t + s[f], 0);
+    return `<div class="card"><div class="card-h"><h2>Итоговый отчёт</h2><span class="sub">${esc(vehTitle(v))} · ${periodLabel(m)} · USD</span></div>
+      <div class="table-wrap" data-keep-scroll="acc-report"><table class="t acc-t">
+        <thead><tr><th>№ п/п</th><th>№ листа</th><th>Гр. / страна</th><th class="r">Туристов</th><th>Даты</th><th>Водитель</th><th class="r">Стоим. услуг</th>
+          <th class="r">Рас. вод.</th><th class="r">Машина</th><th class="r">Ком. вод.</th><th class="r">Сумма расходов</th><th class="r">Чистый доход</th></tr></thead>
+        <tbody>${list.map((s, i) => { const sug = sheetSuggest(s, idx); return `<tr class="clickable" data-action="acc-goto" data-key="${s.key}">
+          <td class="num muted">${i + 1}</td><td class="num">${s.no}</td><td class="wrap-cell">${esc(s.meta.group || sug.group) || '<span class="muted">—</span>'}</td>
+          <td class="r num">${s.meta.pax || sug.pax || '<span class="muted">—</span>'}</td><td class="nw">${fmtRange(s.from, s.to)}</td><td>${esc(s.meta.drivers || v.driver || "—")}</td>
+          ${usdTd(s.cost)}${usdTd(s.drv)}${usdTd(s.carUsd)}${usdTd(s.kom)}${usdTd(s.exp)}<td class="r num" style="font-weight:650">${fmtUsd(s.net)}</td></tr>`; }).join("")}</tbody>
+        <tfoot><tr><td colspan="6">Итого за ${periodLabel(m)}</td>${usdTd(T("cost"))}${usdTd(T("drv"))}${usdTd(T("carUsd"))}${usdTd(T("kom"))}${usdTd(T("exp"))}<td class="r num">${fmtUsd(T("net"))}</td></tr></tfoot>
+      </table></div></div>`;
+  }
+
+  function accFuelTab(v, m) {
+    const rows = fuelRows(v).filter((r) => !m || !r.f.d || inMonth(r.f.d, m));
+    const T = (fn) => rows.reduce((t, r) => t + (fn(r) || 0), 0);
+    const km = T((r) => (r.km > 0 ? r.km : 0)), used = T((r) => (r.km > 0 ? r.used : 0));
+    const per100 = (u, k) => (k > 0 ? (u / k * 100).toLocaleString("ru-RU", { maximumFractionDigits: 1 }) : '<span class="muted">—</span>');
+    return `<div class="card"><div class="card-h wrap"><h2>Отчёт по топливу</h2><span class="sub">${esc(vehTitle(v))} · ${periodLabel(m)}</span><div class="spacer"></div>
+        <button class="btn sm primary" data-action="acc-add" data-list="fuel">${icon("plus")}Заправка</button></div>
+      <div class="table-wrap" data-keep-scroll="acc-fuel"><table class="t acc-t">
+        <thead><tr><th>Дата</th><th class="r">Счётчик<small>км</small></th><th class="r">Проехал<small>км</small></th><th class="r">Заправка<small>л</small></th><th class="r">Канистра<small>л</small></th>
+          <th class="r">Всего<small>л</small></th><th class="r">Цена за 1 л<small>сум</small></th><th class="r">Сумма<small>сум</small></th><th class="r">Курс<small>сум</small></th><th class="r">Сумма<small>USD</small></th><th class="r">Расход<small>л/100 км</small></th><th></th></tr></thead>
+        <tbody>${rows.length ? rows.map(({ f, i, km, total, used, uzs, usd }) => `<tr>
+          <td>${ain(`fuel|${i}|d`, f.d, { type: "date" })}</td><td>${ain(`fuel|${i}|odo`, f.odo, { col: "odo" })}</td>
+          <td class="r num">${km != null ? fmtNum(km) : '<span class="muted">—</span>'}</td>
+          <td>${ain(`fuel|${i}|fill`, f.fill, { col: "fill" })}</td><td>${ain(`fuel|${i}|can`, f.can, { col: "can" })}</td>
+          <td class="r num">${total ? fmtNum(total) : '<span class="muted">—</span>'}</td>
+          <td>${ain(`fuel|${i}|price`, f.price, { col: "price" })}</td>${uzsTd(uzs)}<td>${ain(`fuel|${i}|rate`, f.rate, { col: "rate" })}</td>${usdTd(usd)}
+          <td class="r num">${per100(used, km)}</td><td class="r">${delBtn("fuel", i)}</td></tr>`).join("")
+          : `<tr><td colspan="12" class="empty">Заправок пока нет — нажмите «Заправка»</td></tr>`}</tbody>
+        <tfoot><tr><td colspan="2">Итого</td><td class="r num">${fmtNum(km)}</td><td class="r num">${fmtNum(T((r) => +r.f.fill))}</td><td class="r num">${fmtNum(T((r) => +r.f.can))}</td>
+          <td class="r num">${fmtNum(T((r) => r.total))}</td><td></td><td class="r num">${fmtNum(T((r) => r.uzs))}</td><td></td><td class="r num">${fmtUsd(T((r) => r.usd))}</td><td class="r num">${per100(used, km)}</td><td></td></tr></tfoot>
+      </table></div></div>`;
+  }
+
+  function accPartsTab(v, m) {
+    const rows = partRows(v).filter((r) => !m || !r.p.d || inMonth(r.p.d, m));
+    const T = (fn) => rows.reduce((t, r) => t + (fn(r) || 0), 0);
+    return `<div class="card"><div class="card-h wrap"><h2>Отчёт по запчастям</h2><span class="sub">${esc(vehTitle(v))} · ${periodLabel(m)}</span><div class="spacer"></div>
+        <button class="btn sm primary" data-action="acc-add" data-list="parts">${icon("plus")}Запчасть или расход</button></div>
+      <div class="table-wrap" data-keep-scroll="acc-parts"><table class="t acc-t">
+        <thead><tr><th>Дата</th><th class="r">Счётчик<small>км</small></th><th>Наименование</th><th class="r">Кол-во</th><th class="r">Цена за 1 ед.<small>сум</small></th>
+          <th class="r">Сумма<small>сум</small></th><th class="r">Курс<small>сум</small></th><th class="r">Сумма<small>USD</small></th><th></th></tr></thead>
+        <tbody>${rows.length ? rows.map(({ p, i, uzs, usd }) => `<tr>
+          <td>${ain(`parts|${i}|d`, p.d, { type: "date" })}</td><td>${ain(`parts|${i}|odo`, p.odo, { col: "odo" })}</td>
+          <td>${ain(`parts|${i}|name`, p.name, { txt: true, col: "name", ph: "напр. замена масла" })}</td>
+          <td>${ain(`parts|${i}|qty`, p.qty, { col: "qty" })}</td><td>${ain(`parts|${i}|price`, p.price, { col: "price" })}</td>${uzsTd(uzs)}
+          <td>${ain(`parts|${i}|rate`, p.rate, { col: "rate" })}</td>${usdTd(usd)}<td class="r">${delBtn("parts", i)}</td></tr>`).join("")
+          : `<tr><td colspan="9" class="empty">Расходов на запчасти пока нет</td></tr>`}</tbody>
+        <tfoot><tr><td colspan="3">Итого</td><td class="r num">${fmtNum(T((r) => +r.p.qty))}</td><td></td><td class="r num">${fmtNum(T((r) => r.uzs))}</td><td></td><td class="r num">${fmtUsd(T((r) => r.usd))}</td><td></td></tr></tfoot>
+      </table></div></div>`;
+  }
+
+  function accPayTab(v, m) {
+    const list = accGet(v).pay.map((p, i) => ({ p, i })).filter(({ p }) => !m || p.m === m)
+      .sort((a, b) => (a.p.m || "").localeCompare(b.p.m || "") || a.i - b.i);
+    const byKind = (rows, k) => rows.filter(({ p }) => p.kind === k).reduce((t, { p }) => t + payUsd(p), 0);
+    const subtotal = (rows, label, foot) => `<tr class="${foot ? "" : "sub-row"}"><td colspan="4">${label}</td>
+      <td class="split-cell">карта ${fmtUsd(byKind(rows, "salary"))} · НДФЛ ${fmtUsd(byKind(rows, "ndfl"))} · ком. ${fmtUsd(byKind(rows, "kom"))}</td>
+      <td class="r num">${fmtNum(rows.reduce((t, { p }) => t + (+p.uzs || 0), 0))}</td><td></td><td class="r num">${fmtUsd(rows.reduce((t, { p }) => t + payUsd(p), 0))}</td><td></td></tr>`;
+    const months = [...new Set(list.map(({ p }) => p.m || ""))];
+    const mName = (k) => (k ? monthLabel(k) : "Месяц не указан");
+    return `<div class="card"><div class="card-h wrap"><h2>Зарплата, НДФЛ и командировочные</h2><span class="sub">${esc(vehTitle(v))} · ${periodLabel(m)}</span><div class="spacer"></div>
+        ${[["salary", "Зарплата"], ["ndfl", "НДФЛ"], ["kom", "Командировочные"]].map(([k, l]) => `<button class="btn sm ${k === "salary" ? "primary" : ""}" data-action="acc-add" data-list="pay" data-kind="${k}">${icon("plus")}${l}</button>`).join("")}</div>
+      <div class="table-wrap" data-keep-scroll="acc-pay"><table class="t acc-t">
+        <thead><tr><th>За месяц</th><th>Дата</th><th>Статья</th><th>Кому</th><th>Примечание</th><th class="r">Сумма<small>сум</small></th><th class="r">Курс<small>сум</small></th><th class="r">Сумма<small>USD</small></th><th></th></tr></thead>
+        <tbody>${list.length ? months.map((mk) => {
+          const rows = list.filter(({ p }) => (p.m || "") === mk);
+          return rows.map(({ p, i }) => `<tr>
+            <td>${ain(`pay|${i}|m`, p.m, { type: "month" })}</td><td>${ain(`pay|${i}|d`, p.d, { type: "date" })}</td>
+            <td><select class="ai" data-acc="pay|${i}|kind">${Object.entries(PAYK).map(([k, l]) => `<option value="${k}" ${p.kind === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+            <td>${ain(`pay|${i}|who`, p.who, { txt: true, col: "who" })}</td><td>${ain(`pay|${i}|note`, p.note, { txt: true, col: "note" })}</td>
+            <td>${ain(`pay|${i}|uzs`, p.uzs, { col: "uzs" })}</td><td>${ain(`pay|${i}|rate`, p.rate, { col: "rate" })}</td>
+            <td>${ain(`pay|${i}|usd`, p.usd, { col: "usd" })}</td><td class="r">${delBtn("pay", i)}</td></tr>`).join("") + subtotal(rows, `Итого за ${mName(mk).toLowerCase()}`);
+        }).join("") : `<tr><td colspan="9" class="empty">Выплат пока нет</td></tr>`}</tbody>
+        ${list.length ? `<tfoot>${subtotal(list, "Итого", true)}</tfoot>` : ""}
+      </table></div>
+      <div class="acc-foot muted"><span>Сумма в USD считается из суммы в сумах и курса; командировочные наличными можно вписать сразу в USD.</span></div></div>`;
+  }
+
+  function accTotalTab(v, m, c) {
+    const cell = (label, n, cls = "") => `<div class="${cls}"><div class="k">${label}</div><div class="v num">${fmtUsd(n)}</div></div>`;
+    return `<div class="grid cols-2e">
+      <section class="card"><div class="card-h"><h2>Прибыль</h2><span class="sub">${esc(vehTitle(v))} · ${periodLabel(m)} · USD</span></div>
+        <div class="card-b"><div class="acc-calc">
+          ${cell("Приход (стоимость услуг)", c.income)}
+          ${cell("− Расходы водителей (питание, жильё)", c.drv)}
+          ${cell("− Расходы машины", c.car)}
+          ${cell("− Командировочные водителей", c.kom)}
+          ${cell("− НДФЛ", c.ndfl)}
+          ${cell("− Топливо", c.fuel)}
+          ${cell("− Запчасти и прочее", c.parts)}
+          ${cell("= Чистая прибыль", c.profit, `tot ${c.profit < -0.5 ? "neg" : "ok"}`)}
+        </div></div></section>
+      <section class="card"><div class="card-h"><h2>Командировочные</h2><span class="sub">начислено и выдано водителям · USD</span></div>
+        <div class="card-b"><div class="acc-calc">
+          ${cell("Итого командировочные (по маршрутным листам)", c.kom)}
+          ${cell("− Выдано на зарплатную карту", c.card)}
+          ${cell("− Выдано наличными (ком.)", c.komPaid)}
+          ${cell(c.komLeft < -0.5 ? "= Выдано больше начисленного" : "= Остаток к выплате", Math.abs(c.komLeft), `tot ${c.komLeft > 0.5 ? "neg" : ""}`)}
+        </div>
+        <p class="small muted" style="margin:12px 0 0">Зарплата на карту идёт в счёт командировочных, поэтому в прибыли она не вычитается второй раз — как в Excel.</p></div></section>
+    </div>`;
+  }
+
+  function printRouteSheet(v, s) {
+    const M = s.meta, sug = sheetSuggest(s, reqIndex());
+    printHtml(`<h1>Маршрутный лист №${s.no}</h1>
+      <div>${esc(db.settings.company || "Azim Travel")} · расходный лист водителя · сформировано ${fmtDateLong(TODAY)}</div>
+      <table><tr><td><b>Марка и номер</b></td><td>${esc(vehTitle(v))}</td><td><b>Водители</b></td><td>${esc(M.drivers || v.driver || "—")}</td></tr>
+      <tr><td><b>Гр. / страна</b></td><td>${esc(M.group || sug.group || "—")}</td><td><b>Туристов</b></td><td>${M.pax || sug.pax || "—"}</td></tr>
+      <tr><td><b>Даты</b></td><td>${fmtDateLong(s.from)} — ${fmtDateLong(s.to)}</td><td><b>Дано</b></td><td>водителям ${fmtUzs(s.hotel + s.food)}, на машину ${fmtUzs(s.car)}</td></tr></table>
+      <table><thead><tr><th>День</th><th>Дата</th><th>Маршрут</th><th>Программа</th><th class="r">Проживание, сум</th><th class="r">Питание, сум</th><th class="r">Машина, сум</th><th class="r">Команд., USD</th></tr></thead><tbody>
+      ${s.days.map((x, i) => `<tr><td>${i + 1}</td><td>${fmtDate(x.d)}, ${dow(x.d)}</td><td>${esc(expandRoute(x.route) || "—")}</td><td>${esc(svcText(x.svc) || "—")}</td>
+        <td class="r">${x.hotel ? fmtNum(x.hotel) : ""}</td><td class="r">${x.food ? fmtNum(x.food) : ""}</td><td class="r">${x.car ? fmtNum(x.car) : ""}</td><td class="r">${x.kom ? fmtNum(x.kom) : ""}</td></tr>`).join("")}
+      <tr><td colspan="4"><b>Итого за маршрут</b></td><td class="r"><b>${fmtNum(s.hotel)}</b></td><td class="r"><b>${fmtNum(s.food)}</b></td><td class="r"><b>${fmtNum(s.car)}</b></td><td class="r"><b>${fmtNum(s.kom)}</b></td></tr></tbody></table>
+      <table style="margin-top:40px;border:0"><tr><td style="border:0">Директор ____________________</td><td style="border:0">Водитель ____________________</td></tr></table>`);
+  }
+
+  // правка клетки книги: значение сохраняется сразу, пересчёт — когда фокус уйдёт и кнопку мыши отпустят (иначе клик потеряется)
+  let accPending = false, accFocus = null, pointerHeld = false;
+  function accSet(t) {
+    const v = vehById(ui.acc.vid);
+    if (!v) return;
+    const [kind, k, f] = t.dataset.acc.split("|");
+    const raw = t.value.trim(), val = ACC_TEXT.has(f) ? raw : parseNum(raw);
+    let obj;
+    if (kind === "d") obj = v.schedule.find((x) => x.d === k);
+    else if (kind === "s") { const a = accOf(v); obj = a.sheets[k] || (a.sheets[k] = {}); }
+    else obj = accOf(v)[kind][+k];
+    if (!obj) return;
+    if (val === "" || val == null) delete obj[f]; else obj[f] = val;
+    if (kind === "s" && !Object.keys(obj).length) delete accOf(v).sheets[k];
+    // выплата: USD = сумма в сумах / курс (как формула в Excel); USD можно вписать и вручную
+    if (kind === "pay" && (f === "uzs" || f === "rate") && obj.uzs && obj.rate) obj.usd = Math.round((obj.uzs / obj.rate) * 100) / 100;
+    accPending = true;
+    setTimeout(accFlush, 0);
+  }
+  function accFlush() {
+    if (!accPending || pointerHeld) return;
+    accPending = false;
+    const el = document.activeElement, key = accFocus || (el && el.dataset && el.dataset.acc);
+    accFocus = null;
+    rerender();
+    const n = key && document.querySelector(`[data-acc="${CSS.escape(key)}"]`);
+    if (n) { n.focus(); if (n.select && n.type !== "date" && n.type !== "month") n.select(); }
+  }
+  document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+  document.addEventListener("pointerup", () => { pointerHeld = false; setTimeout(accFlush, 0); }, true);
+
   function drawerVehicle(v) {
     const cost = vehCost(v), paid = paidOf(v), due = cost - paid, t = vehOn(v, TODAY);
-    const byMonth = PERIOD_MONTHS.map((m) => ({ m, items: v.schedule.filter((x) => inMonth(x.d, m)) })).filter((g) => g.items.length);
+    const byMonth = [...new Set(v.schedule.map((x) => x.d.slice(0, 7)))].sort().map((m) => ({ m, items: v.schedule.filter((x) => inMonth(x.d, m)) }));
     return `
       <div class="drawer-h">
         <div><h3>${vdot(v)}${esc(vehTitle(v))}</h3><div class="sub">${esc(v.name)}</div>
           <div style="margin-top:8px">${v.sold ? '<span class="badge sold">Продан</span>' : t ? `<span class="badge active">Сегодня: ${esc(t.route || "в работе")}</span>` : '<span class="badge plain">Сегодня свободен</span>'}</div></div>
         <div class="actions">
+          ${v.partner ? "" : `<button class="btn sm" data-action="acc-open" data-id="${v.id}">${icon("file")}Учёт водителя</button>`}
           <button class="btn sm" data-action="edit-vehicle" data-id="${v.id}">${icon("edit")}Изменить</button>
           <button class="btn icon sm ghost" data-action="close-drawer" aria-label="Закрыть">${icon("x")}</button>
         </div>
@@ -1297,7 +1857,7 @@
           <button class="btn primary" type="submit">${icon("plus")}Выплата</button>
         </form>
         <div class="section-t">График работы</div>
-        ${byMonth.length ? byMonth.map((g) => `<div style="margin-bottom:14px"><div style="font-weight:600;margin-bottom:6px">${MONTHS[g.m - 1]} · ${g.items.length} дн. · ${fmtUsd(g.items.reduce((s, x) => s + x.cost, 0))}</div>
+        ${byMonth.length ? byMonth.map((g) => `<div style="margin-bottom:14px"><div style="font-weight:600;margin-bottom:6px">${monthLabel(g.m)} · ${g.items.length} дн. · ${fmtUsd(g.items.reduce((s, x) => s + x.cost, 0))}</div>
           <div class="days">${g.items.map((x) => `<div class="day ${x.d === TODAY ? "is-today" : ""}"><div><div class="dn">${fmtDate(x.d)}</div><div class="dd">${dow(x.d)}</div></div>
             <div><div class="route" title="${esc(expandRoute(x.route))}">${esc(x.route || "—")}</div>${svcChips(x.svc)}</div><div class="cost num">${x.cost ? fmtUsd(x.cost) : "—"}</div></div>`).join("")}</div></div>`).join("")
           : `<div class="empty">В графике нет рабочих дней</div>`}
@@ -1424,7 +1984,7 @@
           <thead><tr><th>№</th><th>Группа</th><th>Даты</th><th class="r">Тур.</th><th class="r">Сумма</th><th class="r">Остаток</th><th>Статус</th></tr></thead>
           <tbody>${reqs.map((r) => `<tr class="clickable ${r.cancelled ? "cancelled" : ""}" data-open-request="${r.id}">
             <td class="num muted">${r.no}</td><td>${esc(r.group || "—")}<div class="cell-sub">${esc(routeSummary(r.days))}</div></td>
-            <td class="nowrap">${fmtRange(r.from, r.to)}</td><td class="r num">${r.pax || "—"}</td>
+            <td class="nowrap">${fmtRange(r.from, r.to)}</td><td class="r num">${esc(paxOf(r)) || "—"}</td>
             <td class="r num">${fmtUsd(r.total || 0)}</td><td class="r num">${fmtUsd(dueOf(r))}</td>
             <td><span class="badge ${reqStatus(r)}">${STATUS[reqStatus(r)]}</span></td></tr>`).join("")}</tbody>
         </table></div></div>
@@ -1432,8 +1992,22 @@
   }
 
   /* ================= Настройки ================= */
+  async function restoreBackup(input) {
+    const file = input.files[0];
+    input.value = "";
+    let d = null;
+    try { d = upgrade(JSON.parse(await file.text())); } catch (e) { d = null; }
+    if (!d) return toast("Это не резервная копия CRM: в файле нет заявок и транспорта");
+    if (!(await confirmBox(`<b>Восстановить из копии ${esc(file.name)}?</b><p class="muted" style="margin-bottom:0">Заявок: ${d.requests.length}, транспорта: ${d.vehicles.length}. Текущие данные${API ? " на сервере — у всех сотрудников —" : ""} заменятся этой копией.</p>`, "Восстановить", true))) return;
+    db = d;
+    drawer = null;
+    ui.fleet.month = fleetMonth();
+    rerender();
+    toast("Данные восстановлены из копии");
+  }
+
   function viewSettings() {
-    const s = db.settings;
+    const s = db.settings, N = accNorm();
     return `
       <div class="grid cols-2e">
         <section class="card">
@@ -1444,6 +2018,13 @@
               <div class="field"><label>НДС при перечислении, %</label><input class="input num" name="vat" type="number" min="0" step="any" value="${s.vat}"></div>
             </div>
             <p class="small muted">Применяется к новым заявкам. У импортированных заявок сохраняется курс из Excel.</p>
+            <div class="section-t">Нормы водителей</div>
+            <div class="form-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+              <div class="field"><label>Питание в день, сум</label><input class="input num" name="food" type="number" min="0" value="${N.food}"></div>
+              <div class="field"><label>Проживание вне Самарканда, сум</label><input class="input num" name="hotel" type="number" min="0" value="${N.hotel}"></div>
+              <div class="field"><label>Командировочные в день, USD</label><input class="input num" name="kom" type="number" min="0" step="any" value="${N.kom}"></div>
+            </div>
+            <p class="small muted">Подставляются кнопкой «Заполнить по норме» в маршрутных листах (раздел «Учёт водителей»).</p>
             <button class="btn primary" type="submit">Сохранить</button>
           </form>
         </section>
@@ -1451,17 +2032,19 @@
           <div class="card-h"><h2>Данные</h2></div>
           <div class="card-b">
             <div class="info-grid" style="grid-template-columns:1fr 1fr">
-              ${info("Источник", esc(db.source))}
-              ${info("Импортировано", esc(db.importedAt))}
+              ${info("Хранение", API ? `на сервере <code>${esc(API)}</code>` : "в этом браузере")}
+              ${info("Первичные данные", db.source ? `${esc(db.source)}<div class="small muted">импорт ${esc(db.importedAt)}</div>` : "—")}
               ${info("Заявок", db.requests.length)}
               ${info("Единиц транспорта", db.vehicles.length)}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
               <button class="btn" data-action="export-csv">${icon("download")}Заявки в CSV (Excel)</button>
-              <button class="btn" data-action="export-json">${icon("file")}Все данные JSON</button>
-              <button class="btn danger" data-action="reset-data">${icon("restore")}Сбросить демо-данные</button>
+              <button class="btn" data-action="export-json">${icon("download")}Резервная копия (JSON)</button>
+              <label class="btn">${icon("restore")}Восстановить из копии<input type="file" accept=".json,application/json" data-import="json" hidden></label>
             </div>
-            <p class="small muted" style="margin-bottom:0">Обновить данные из нового Excel: <code>python3 tools/excel_to_data.py "файл.xlsx"</code></p>
+            ${SEED ? `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+              <button class="btn danger" data-action="reset-data">${icon("restore")}Заменить всё данными из Excel</button>
+              <p class="small muted" style="margin-bottom:0">Файл ${esc(SEED.source)} от ${esc(SEED.importedAt)}. Все заявки, транспорт и учёт водителей заменятся${API ? " на сервере для всех сотрудников" : ""}. Новый Excel: <code>python3 tools/excel_to_data.py "файл.xlsx"</code>, затем эта кнопка.</p></div>` : ""}
           </div>
         </section>
       </div>
@@ -1519,12 +2102,12 @@
     });
   }
 
-  function toast(msg) {
+  function toast(msg, ms = 2600) {
     const t = document.createElement("div");
     t.className = "toast";
     t.textContent = msg;
     $("#toasts").appendChild(t);
-    setTimeout(() => t.remove(), 2600);
+    setTimeout(() => t.remove(), ms);
   }
 
   const tip = document.createElement("div");
@@ -1553,7 +2136,7 @@
     printHtml(`<h1>Программа обслуживания группы</h1>
       <div>Azim Travel · заявка №${r.no} · сформировано ${fmtDateLong(TODAY)}</div>
       <table><tr><td><b>Заказчик</b></td><td>${esc(r.customer)}</td><td><b>Группа</b></td><td>${esc(r.group || "—")} ${esc(r.country || "")}</td></tr>
-      <tr><td><b>Даты</b></td><td>${fmtDateLong(r.from)} — ${fmtDateLong(r.to)}</td><td><b>Туристов</b></td><td>${r.pax || "—"}</td></tr>
+      <tr><td><b>Даты</b></td><td>${fmtDateLong(r.from)} — ${fmtDateLong(r.to)}</td><td><b>Туристов</b></td><td>${esc(paxOf(r)) || "—"}</td></tr>
       <tr><td><b>Транспорт</b></td><td>${esc(r.transport || "—")}</td><td><b>Сопровождающий</b></td><td>${e ? esc(e.name) + (e.phone ? ", " + e.phone : "") : "—"}</td></tr></table>
       <table><thead><tr><th>День</th><th>Дата</th><th>Маршрут</th><th>Услуги</th><th class="r">Стоимость, USD</th></tr></thead><tbody>
       ${r.days.map((d) => `<tr><td>${d.n}</td><td>${d.d ? `${fmtDate(d.d)}, ${dow(d.d)}` : ""}</td><td>${esc(expandRoute(d.route) || "—")}</td><td>${esc(svcText(d.svc) || "—")}</td><td class="r">${d.cost ? fmtNum(d.cost) : "—"}</td></tr>`).join("")}
@@ -1564,9 +2147,9 @@
     if (!c) return;
     const reqs = c.reqs.slice().sort((a, b) => (a.from || "").localeCompare(b.from || ""));
     printHtml(`<h1>Акт сверки взаиморасчётов</h1>
-      <div>Azim Travel — ${esc(c.name)} · период июль–декабрь ${YEAR} · на ${fmtDateLong(TODAY)}</div>
+      <div>Azim Travel — ${esc(c.name)} · период ${periodText()} · на ${fmtDateLong(TODAY)}</div>
       <table><thead><tr><th>№</th><th>Группа</th><th>Даты</th><th class="r">Туристов</th><th class="r">Начислено, USD</th><th class="r">Оплачено, USD</th><th class="r">Остаток, USD</th></tr></thead><tbody>
-      ${reqs.map((r) => `<tr><td>${r.no}</td><td>${esc(r.group || "—")}${r.cancelled ? " (аннуляция)" : ""}</td><td>${fmtRange(r.from, r.to)}</td><td class="r">${r.pax || ""}</td><td class="r">${fmtNum(r.total || 0)}</td><td class="r">${fmtNum(paidOf(r))}</td><td class="r">${fmtNum(dueOf(r))}</td></tr>`).join("")}
+      ${reqs.map((r) => `<tr><td>${r.no}</td><td>${esc(r.group || "—")}${r.cancelled ? " (аннуляция)" : ""}</td><td>${fmtRange(r.from, r.to)}</td><td class="r">${esc(paxOf(r))}</td><td class="r">${fmtNum(r.total || 0)}</td><td class="r">${fmtNum(paidOf(r))}</td><td class="r">${fmtNum(dueOf(r))}</td></tr>`).join("")}
       <tr><td colspan="4"><b>Итого</b></td><td class="r"><b>${fmtNum(c.total)}</b></td><td class="r"><b>${fmtNum(c.paid)}</b></td><td class="r"><b>${fmtNum(c.due)}</b></td></tr></tbody></table>
       <p>Остаток при оплате перечислением (курс заявки, НДС): <b>${fmtUzs(c.dueUzs)}</b></p>
       <table style="margin-top:40px;border:0"><tr><td style="border:0">Azim Travel ____________________</td><td style="border:0">${esc(c.name)} ____________________</td></tr></table>`);
@@ -1585,7 +2168,7 @@
     const list = currentView().view.id === "requests" ? filteredRequests() : db.requests;
     const head = ["№", "Заказчик", "Группа", "Страна", "С", "По", "Туристов", "Транспорт", "Сопровождающий", "Маршрут", "Сумма USD", "Оплачено USD", "Остаток USD", "Статус"];
     const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = list.map((r) => [r.no, r.customer, r.group, r.country, r.from, r.to, r.pax, r.transport, r.escort, routeSummary(r.days), r.total || 0, Math.round(paidOf(r) * 100) / 100, Math.round(dueOf(r) * 100) / 100, STATUS[reqStatus(r)]]);
+    const rows = list.map((r) => [r.no, r.customer, r.group, r.country, r.from, r.to, paxOf(r), r.transport, r.escort, routeSummary(r.days), r.total || 0, Math.round(paidOf(r) * 100) / 100, Math.round(dueOf(r) * 100) / 100, STATUS[reqStatus(r)]]);
     download(`azim-zayavki-${TODAY}.csv`, "﻿" + [head, ...rows].map((r) => r.map(cell).join(";")).join("\r\n"), "text/csv;charset=utf-8");
     toast(`Выгружено заявок: ${list.length}`);
   }
@@ -1624,6 +2207,7 @@
 
   document.addEventListener("input", (e) => {
     const t = e.target;
+    if (!db) return;
     if (t.id === "global-search") return renderSearch();
     if (t.dataset.filter === "q") { ui.req.q = t.value; applyReqSearch(); return; }
     if (t.dataset.clients === "q") { ui.clients.q = t.value; applyClientSearch(); return; }
@@ -1638,7 +2222,11 @@
     if (t.dataset.filter && t.dataset.filter !== "q") { ui.req[t.dataset.filter] = t.value; render(); }
     if (t.dataset.cal === "customer") { ui.cal.customer = t.value; ui.cal.reanchor = true; render(); }
     if (t.dataset.cal === "cancelled") { ui.cal.cancelled = t.checked; render(); }
-    if (t.dataset.fleet === "month") { ui.fleet.month = +t.value; render(); }
+    if (t.dataset.fleet === "month") { ui.fleet.month = t.value; render(); }
+    if (t.dataset.accf === "month") { ui.acc.month = t.value; render(); }
+    if (t.dataset.accf === "vid") { ui.acc.vid = t.value; render(); }
+    if (t.dataset.acc) accSet(t);
+    if (t.dataset.import === "json" && t.files[0]) restoreBackup(t);
   });
 
   document.addEventListener("submit", (e) => {
@@ -1674,6 +2262,7 @@
       if (!(rate > 0) || !(vat >= 0)) return toast("Проверьте значения");
       db.settings.rate = rate;
       db.settings.vat = vat;
+      db.settings.acc = { food: Math.max(0, +f.food.value || 0), hotel: Math.max(0, +f.hotel.value || 0), kom: Math.max(0, +f.kom.value || 0) };
       toast("Настройки сохранены");
       return rerender();
     }
@@ -1693,6 +2282,13 @@
       if (e.key === "Escape") { e.target.value = ""; renderSearch(); }
       return;
     }
+    if (e.key === "Enter" && e.target.dataset && e.target.dataset.col) {
+      e.preventDefault();
+      const t = e.target, col = $$(`[data-col="${t.dataset.col}"]`, t.closest("table"));
+      const next = col[col.indexOf(t) + 1];
+      if (next) { next.focus(); next.select(); } else t.blur();
+      return;
+    }
     if (e.key === "Escape") {
       if (modal) { if (modal.resolve) modal.resolve(false); closeModal(); }
       else if (drawer) closeDrawer();
@@ -1702,10 +2298,20 @@
 
   document.addEventListener("click", async (e) => {
     const t = e.target;
+    if (t.closest("[data-action=boot-retry]")) return boot();
+    if (!db) return;
     if (!t.closest("#search-results") && t.id !== "global-search") $("#search-results").classList.add("hidden");
 
     const sr = t.closest("[data-search-kind]");
     if (sr) { e.preventDefault(); return openSearchResult(sr.dataset.searchKind, sr.dataset.searchId); }
+    // повторный клик по «Учёт водителей» в меню — к списку всех водителей
+    const navA = t.closest('#nav a[href="#/drivers"]');
+    if (navA && currentView().view.id === "drivers" && ui.acc.vid) {
+      e.preventDefault();
+      ui.acc.vid = null;
+      $("#app").classList.remove("nav-open");
+      return render();
+    }
 
     const a = t.closest("[data-action]");
     const action = a && a.dataset.action;
@@ -1833,7 +2439,78 @@
       case "rb-jump": ribbonScrollTo(a.dataset.key, `${a.dataset.ym}-01`, true); break;
       case "rb-today": ribbonScrollTo(a.dataset.key, ribbonTodayAnchor(a.dataset.key), true); break;
       case "fleet-tab": ui.fleet.tab = a.dataset.v; render(); break;
+      case "acc-open": {
+        ui.acc.vid = a.dataset.id;
+        if (drawer) closeDrawer();
+        if (currentView().view.id !== "drivers") go("drivers"); else render();
+        window.scrollTo(0, 0);
+        break;
+      }
+      case "acc-back": ui.acc.vid = null; render(); break;
+      case "acc-tab": ui.acc.tab = a.dataset.v; render(); break;
+      case "acc-goto": {
+        ui.acc.tab = "sheets";
+        render();
+        const el = document.getElementById(`acc-s-${a.dataset.key}`);
+        if (el) el.scrollIntoView({ block: "start" });
+        break;
+      }
+      case "acc-cell": openCellEditor("veh", ui.acc.vid, a.dataset.d); break;
+      case "acc-split":
+      case "acc-merge": {
+        const v = vehById(ui.acc.vid), x = v && v.schedule.find((y) => y.d === a.dataset.d);
+        if (!x) break;
+        if (action === "acc-split") x.split = true; else delete x.split;
+        toast(action === "acc-split" ? `Новый маршрутный лист с ${fmtDate(x.d)}` : "Листы объединены");
+        rerender();
+        break;
+      }
+      case "acc-norm": {
+        const v = vehById(ui.acc.vid), s = v && routeSheets(v).find((y) => y.key === a.dataset.key);
+        if (!s) break;
+        const N = accNorm();
+        let n = 0;
+        for (const x of s.days) {
+          if (x.food == null && N.food) { x.food = N.food; n++; }
+          if (x.hotel == null && N.hotel && nightAway(x.route)) { x.hotel = N.hotel; n++; }
+          if (x.kom == null && N.kom) { x.kom = N.kom; n++; }
+        }
+        toast(n ? `Заполнено по норме: ${n} ${plural(n, "клетка", "клетки", "клеток")}` : "Пустых клеток нет");
+        rerender();
+        break;
+      }
+      case "acc-print": {
+        const v = vehById(ui.acc.vid), s = v && routeSheets(v).find((y) => y.key === a.dataset.key);
+        if (s) printRouteSheet(v, s);
+        break;
+      }
+      case "acc-add": {
+        const v = vehById(ui.acc.vid);
+        if (!v) break;
+        const list = accOf(v)[a.dataset.list], m = ui.acc.month;
+        // дата новой строки — сегодня, а если выбран другой месяц, то его первое число (иначе строка скроется фильтром)
+        const d = !m || inMonth(TODAY, m) ? TODAY : `${m}-01`, rate = db.settings.rate;
+        const last = list[list.length - 1] || {};
+        const row = a.dataset.list === "fuel" ? { d, price: last.price, rate }
+          : a.dataset.list === "parts" ? { d, qty: 1, rate }
+          : { m: d.slice(0, 7), d, kind: a.dataset.kind, who: a.dataset.kind === "ndfl" ? "" : v.driver || "", rate };
+        list.push(row);
+        rerender();
+        const first = $(`[data-acc="${a.dataset.list}|${list.length - 1}|${a.dataset.list === "fuel" ? "odo" : a.dataset.list === "parts" ? "name" : "uzs"}"]`);
+        if (first) first.focus();
+        break;
+      }
+      case "acc-del": {
+        const v = vehById(ui.acc.vid), list = v && accOf(v)[a.dataset.list], i = +a.dataset.i;
+        if (!list || !list[i]) break;
+        const filled = Object.entries(list[i]).some(([k, x]) => !["d", "m", "rate", "kind", "who", "qty", "price"].includes(k) && x !== "" && x != null);
+        if (filled && !(await confirmBox("Удалить эту строку?", "Удалить", true))) break;
+        list.splice(i, 1);
+        rerender();
+        break;
+      }
       case "fleet-group": ui.fleet.group = a.dataset.v; render(); break;
+      case "acc-group": ui.acc.group = a.dataset.v; render(); break;
       case "fin-tab": ui.fin.tab = a.dataset.v; render(); break;
       case "fin-toggle": {
         const n = a.dataset.name;
@@ -1844,11 +2521,13 @@
       case "export-csv": exportCsv(); break;
       case "export-json": download(`azim-crm-${TODAY}.json`, JSON.stringify(db, null, 2), "application/json"); break;
       case "reset-data": {
-        if (!(await confirmBox("<b>Сбросить демо-данные?</b><p class=\"muted\" style=\"margin-bottom:0\">Все изменения, сделанные в браузере, удалятся. Данные вернутся к состоянию из Excel.</p>", "Сбросить", true))) return;
+        if (!SEED) return;
+        if (!(await confirmBox(`<b>Заменить всё данными из Excel?</b><p class="muted" style="margin-bottom:0">Все правки${API ? " на сервере — у всех сотрудников —" : ""} удалятся: заявки, оплаты, транспорт и учёт водителей вернутся к файлу ${esc(SEED.source)}. Перед этим стоит скачать резервную копию.</p>`, "Заменить", true))) return;
         db = fresh();
         drawer = null;
+        ui.fleet.month = fleetMonth();
         rerender();
-        toast("Данные сброшены");
+        toast("Данные заменены данными из Excel");
         break;
       }
     }
@@ -1874,11 +2553,36 @@
   $("#search-icon").innerHTML = icon("search");
   $("#theme-btn").innerHTML = icon(document.documentElement.dataset.theme === "dark" ? "sun" : "moon");
   window.addEventListener("hashchange", () => {
+    if (!db) return;
     $("#app").classList.remove("nav-open");
     drawer = null;
     if (modal) { if (modal.resolve) modal.resolve(false); closeModal(); }
     render();
     window.scrollTo(0, 0);
   });
-  render();
+  // не закрывать вкладку, пока правки не дошли до сервера
+  window.addEventListener("beforeunload", (e) => {
+    if (API && (sync.dirty || sync.busy)) { e.preventDefault(); e.returnValue = ""; }
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pull(); });
+  setInterval(pull, 30000);
+
+  async function boot() {
+    setSync(sync.state);
+    $("#view").innerHTML = `<div class="boot">Загружаю данные…</div>`;
+    try {
+      db = await loadDb();
+    } catch (e) {
+      const login = e.auth && CFG.loginUrl ? `<a class="btn primary" href="${esc(CFG.loginUrl)}">Войти</a>` : "";
+      $("#view").innerHTML = `<div class="boot err"><b>Не удалось загрузить данные: ${esc(e.message)}.</b>
+        <p class="muted">Сервер: <code>${esc(API)}</code></p><div style="display:flex;gap:8px;justify-content:center">${login}<button class="btn" data-action="boot-retry">Повторить</button></div></div>`;
+      setSync(e.auth ? "auth" : "error", e.message);
+      return;
+    }
+    ui.fleet.month = fleetMonth();
+    setSync(!API ? "local" : sync.dirty ? "saving" : "ok");
+    render();
+    if (sync.dirty) push(); // пустой сервер получает первые данные
+  }
+  boot();
 })();

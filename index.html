@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Azim Travel CRM</title>
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b7a75'/%3E%3Ctext x='16' y='21.5' font-family='Arial,sans-serif' font-size='14' font-weight='700' fill='white' text-anchor='middle'%3EAT%3C/text%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -29,7 +31,7 @@
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="sidebar-foot">
-        <div class="demo-badge"><b>Демо-режим.</b> Данные из Excel, изменения сохраняются только в этом браузере.</div>
+        <div class="sync" id="sync" role="status" aria-live="polite"></div>
         <div class="user">
           <div class="avatar">МН</div>
           <div>
@@ -55,7 +57,7 @@
         <button class="btn primary new-btn" data-action="new-request"></button>
         <button class="btn icon ghost" data-action="toggle-theme" id="theme-btn" aria-label="Сменить тему"></button>
       </header>
-      <main class="content" id="view"></main>
+      <main class="content" id="view"><noscript>Для работы CRM включите JavaScript в браузере.</noscript></main>
     </div>
   </div>
 
@@ -63,6 +65,7 @@
   <div class="toast-wrap" id="toasts"></div>
   <div id="print-area"></div>
 
+  <script src="js/config.js"></script>
   <script src="js/data.js"></script>
   <script src="js/app.js"></script>
 </body>
