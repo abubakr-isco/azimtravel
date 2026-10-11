@@ -4,9 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Azim Travel CRM</title>
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%232a7f7c' d='M16 .5L19.6 7.32 26.96 5.04 24.68 12.4 31.5 16 24.68 19.6 26.96 26.96 19.6 24.68 16 31.5 12.4 24.68 5.04 26.96 7.32 19.6.5 16 7.32 12.4 5.04 5.04 12.4 7.32Z'/%3E%3Cpath fill='white' d='M16 9.4L17.53 12.3 20.67 11.33 19.7 14.47 22.6 16 19.7 17.53 20.67 20.67 17.53 19.7 16 22.6 14.47 19.7 11.33 20.67 12.3 17.53 9.4 16 12.3 14.47 11.33 11.33 14.47 12.3Z'/%3E%3Ccircle cx='16' cy='16' r='1.9' fill='%23a87612'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Sofia+Sans:wght@400..800&family=Sofia+Sans+Condensed:wght@500..800&family=Sofia+Sans+Semi+Condensed:wght@400..750&family=Carlito:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
   <script>
     // тема применяется до отрисовки, чтобы не мигало
@@ -21,19 +23,21 @@
   <div class="app" id="app">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">AT</div>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path fill="currentColor" d="M16 .5L19.6 7.32 26.96 5.04 24.68 12.4 31.5 16 24.68 19.6 26.96 26.96 19.6 24.68 16 31.5 12.4 24.68 5.04 26.96 7.32 19.6.5 16 7.32 12.4 5.04 5.04 12.4 7.32Z"/><path class="core" d="M16 9.4L17.53 12.3 20.67 11.33 19.7 14.47 22.6 16 19.7 17.53 20.67 20.67 17.53 19.7 16 22.6 14.47 19.7 11.33 20.67 12.3 17.53 9.4 16 12.3 14.47 11.33 11.33 14.47 12.3Z"/><circle class="seed" cx="16" cy="16" r="1.7"/></svg>
+        </div>
         <div>
           <div class="brand-name">Azim Travel</div>
-          <div class="brand-sub">CRM · транспорт и туры</div>
+          <div class="brand-sub">транспорт и туры</div>
         </div>
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="sidebar-foot">
-        <div class="demo-badge"><b>Демо-режим.</b> Данные из Excel, изменения сохраняются только в этом браузере.</div>
+        <div class="sync" id="sync" role="status" aria-live="polite"></div>
         <div class="user">
           <div class="avatar">МН</div>
           <div>
-            <div style="font-weight:600;font-size:13px">Менеджер</div>
+            <div class="user-name">Менеджер</div>
             <div class="small muted">Офис Самарканд</div>
           </div>
         </div>
@@ -55,7 +59,7 @@
         <button class="btn primary new-btn" data-action="new-request"></button>
         <button class="btn icon ghost" data-action="toggle-theme" id="theme-btn" aria-label="Сменить тему"></button>
       </header>
-      <main class="content" id="view"></main>
+      <main class="content" id="view"><noscript>Для работы CRM включите JavaScript в браузере.</noscript></main>
     </div>
   </div>
 
@@ -63,6 +67,7 @@
   <div class="toast-wrap" id="toasts"></div>
   <div id="print-area"></div>
 
+  <script src="js/config.js"></script>
   <script src="js/data.js"></script>
   <script src="js/app.js"></script>
 </body>

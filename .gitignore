@@ -1,0 +1,15 @@
+# сборка для сервера: python3 tools/build.py
+dist/
+
+# файлы с данными клиентов и большие файлы — не для репозитория
+*.xlsx
+*.xls
+*.mp4
+Снимок экрана*
+*.png
+*.jpg
+*.jpeg
+!img/logo.png
+
+.DS_Store
+__pycache__/
