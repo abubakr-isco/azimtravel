@@ -17,6 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = ["css/style.css", "js/config.js", "js/data.js", "js/app.js"]
+# копируются как есть: на них ссылается не index.html, а печатные формы
+ASSETS = ["img/logo.png"]
 
 
 def main():
@@ -55,6 +57,9 @@ def main():
         if not n:
             raise SystemExit(f"в index.html нет ссылки на {f}")
 
+    for f in ASSETS:
+        (out / f).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / f, out / f)
     (out / "index.html").write_text(html, encoding="utf-8")
     config = (out / "js/config.js").read_text(encoding="utf-8")
     api = re.search(r'api:\s*"([^"]*)"', config).group(1)

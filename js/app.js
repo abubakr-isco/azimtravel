@@ -7,6 +7,7 @@
   const API = String(CFG.api || "").replace(/\/+$/, "");
   const STORE_KEY = "azim-crm-v1";
   const THEME_KEY = "azim-theme";
+  const NAV_KEY = "azim-nav"; // "closed" — меню скрыто (на широком экране)
 
   /* ================= Справочники ================= */
   const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
@@ -139,6 +140,15 @@
   const svcChips = (list) => (list && list.length ? `<div class="chips">${list.map(svcChip).join("")}</div>` : "");
   const svcText = (list) => (list || []).map((s) => [s.t, s.s ? svcInfo(s.s).label : null].filter(Boolean).join(" ")).join(", ");
 
+  // доп. цены дня с комментарием: day.extra = [{ usd, note }]; day.cost — итог дня вместе с ними
+  const cents = (n) => Math.round(n * 100) / 100;
+  const extraSum = (x) => cents(((x && x.extra) || []).reduce((s, e) => s + (+e.usd || 0), 0));
+  const baseCost = (x) => (x ? cents((x.cost || 0) - extraSum(x)) : 0);
+  const extraLabel = (e) => [e.usd ? (e.usd > 0 ? "+" : "") + fmtUsd(e.usd) : "", e.note].filter(Boolean).join(" ");
+  // стоимость дня для подсказки: итог и из чего он сложился
+  const costTip = (x) => (x ? [x.cost ? fmtUsd(x.cost) : "", ...(x.extra || []).map(extraLabel)].filter(Boolean).join("\n") : "");
+  const extraList = (x) => (x && x.extra && x.extra.length ? `<div class="xtra">${x.extra.map((e) => `<div>${esc(extraLabel(e))}</div>`).join("")}</div>` : "");
+
   function expandRoute(route) {
     if (!route) return "";
     return route.split(/\s*-\s*/).map((p) => CITY[p] || p).join(" → ");
@@ -170,6 +180,7 @@
   // начальные данные: из Excel, а если их нет в сборке — пустая база
   function fresh() {
     const d = SEED ? structuredClone(SEED) : { source: null, importedAt: null, settings: { ...DEFAULT_SETTINGS }, requests: [], vehicles: [] };
+    d.clients = d.clients || [];
     for (const r of d.requests) r.log = [{ ts: d.importedAt, text: "Импортировано из Excel" }];
     for (const v of d.vehicles) v.log = [];
     assignHues(d);
@@ -182,6 +193,8 @@
     d.settings = { ...DEFAULT_SETTINGS, ...d.settings };
     for (const r of d.requests) { r.days = r.days || []; r.payments = r.payments || []; r.log = r.log || []; }
     for (const v of d.vehicles) { v.schedule = v.schedule || []; v.payments = v.payments || []; v.log = v.log || []; }
+    // заказчики, добавленные вручную: [{ id, name, phone, note }]; остальные заказчики берутся из заявок
+    if (!Array.isArray(d.clients)) d.clients = [];
     if (d.hueV !== HUE_VERSION) assignHues(d);
     if (!d.seq) d.seq = Math.max(0, ...d.requests.map((r) => r.no || 0)) + 1;
     return d;
@@ -256,15 +269,16 @@
       if (sync.dirty && sync.state === "saving") sync.timer = setTimeout(push, 400);
     }
   }
-  // объединение правок: заявки и машины, изменённые здесь, переносятся в свежую версию с сервера;
+  // объединение правок: заявки, машины и заказчики, изменённые здесь, переносятся в свежую версию с сервера;
   // если ту же запись успел изменить другой сотрудник — остаётся его вариант
   function mergeDb(base, mine, theirs) {
     const out = structuredClone(theirs);
     let lost = 0;
-    for (const key of ["requests", "vehicles"]) {
-      const b = new Map(base[key].map((x) => [x.id, JSON.stringify(x)]));
-      const t = new Map(theirs[key].map((x) => [x.id, JSON.stringify(x)]));
-      const m = new Map(mine[key].map((x) => [x.id, x]));
+    for (const key of ["requests", "vehicles", "clients"]) {
+      out[key] = out[key] || [];
+      const b = new Map((base[key] || []).map((x) => [x.id, JSON.stringify(x)]));
+      const t = new Map((theirs[key] || []).map((x) => [x.id, JSON.stringify(x)]));
+      const m = new Map((mine[key] || []).map((x) => [x.id, x]));
       for (const [id, x] of m) {
         const sx = JSON.stringify(x);
         if (b.get(id) === sx) continue; // здесь не меняли
@@ -411,14 +425,86 @@
   const vehOn = (v, d) => v.schedule.find((x) => x.d === d);
   const vehTitle = (v) => (v.partner ? v.driver || v.name : `${v.brand} ${v.plate || ""}`.trim());
   const vehSub = (v) => (v.partner ? "Частный перевозчик" : [v.driver, v.seats && `мест: ${v.seats}`, v.sold && "продан"].filter(Boolean).join(" · ") || "—");
-  const vdot = (v) => `<span class="vdot vc ${v.partner ? "gray" : ""}" style="--vh:${v.hue}"></span>`;
-  const rdot = (r) => `<span class="vdot vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}"></span>`;
-  const huePick = (action, id, cur) => `<div class="hue-pick">${(HUES.includes(cur) ? HUES : [cur, ...HUES]).map((h) =>
-    `<button class="vc ${h === cur ? "on" : ""}" style="--vh:${h}" data-action="${action}" data-id="${id}" data-h="${h}" aria-label="Выбрать этот цвет"></button>`).join("")}</div>`;
-  const HUES = [...PALETTE].sort((a, b) => a - b);
-  // свой цвет клетки дня (оттенок палитры или "gray"), рисуется поверх цвета строки
+  /* Цвет заявки, машины или дня: оттенок OKLCH (число), "red" — нет авто, "#rrggbb" — свой цвет из палитры.
+     Каждый оттенок и «нет авто» можно перекрасить в «Цвета графика» (settings.colors: { оттенок: "#rrggbb" }) —
+     тогда меняется у всех заявок и машин с этим цветом.
+     hueCls/hueStyle дают класс и переменные для элемента .vc; --c-on — цвет текста на сплошной заливке своего цвета. */
+  const NOCAR = "red"; // ярко-красный: машина ещё не назначена (в автоматическую раздачу цветов не входит)
+  const isHex = (h) => typeof h === "string" && /^#[0-9a-f]{6}$/i.test(h);
+  const userColor = (h) => (db.settings.colors || {})[h] || null;
+  const hexOf = (h) => (isHex(h) ? h : typeof h === "number" ? userColor(h) : null);
+  const hueCls = (h) => (h === NOCAR ? "nocar" : hexOf(h) ? "hex" : "");
+  const hueStyle = (h) => { const x = hexOf(h); return x ? `--vh:0;--vx:${x};--c-on:${onColor(x)}` : `--vh:${h === NOCAR ? 25 : h};--c-on:initial`; };
+  // стандартный цвет оттенка (как заливка переезда в светлой теме) — с него начинается выбор в палитре
+  function oklchHex(L, C, h) {
+    const a = C * Math.cos((h * Math.PI) / 180), b = C * Math.sin((h * Math.PI) / 180);
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3, m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3, s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+    return "#" + [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s]
+      .map((x) => Math.round(Math.min(1, Math.max(0, x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055)) * 255).toString(16).padStart(2, "0")).join("");
+  }
+  const baseHex = (h) => (h === NOCAR ? "#e02424" : oklchHex(0.55, 0.15, h));
+  // «нет авто» рисуется через CSS-переменные --nocar и --nocar-on
+  function applyNocar() {
+    const x = userColor(NOCAR), st = document.documentElement.style;
+    if (x) { st.setProperty("--nocar", x); st.setProperty("--nocar-on", onColor(x)); }
+    else { st.removeProperty("--nocar"); st.removeProperty("--nocar-on"); }
+  }
+  const parseHue = (h) => (h === NOCAR || isHex(h) ? h.toLowerCase() : +h);
+  // чёрный или белый текст — что контрастнее на этом цвете
+  function onColor(hex) {
+    const lin = (i) => { const c = parseInt(hex.slice(i, i + 2), 16) / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+    const L = 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
+    return (L + 0.05) / 0.0632 > 1.05 / (L + 0.05) ? "#141b2e" : "#ffffff";
+  }
+  const vdot = (v) => `<span class="vdot vc ${v.partner ? "gray" : hueCls(v.hue)}" style="${hueStyle(v.hue)}"></span>`;
+  const rdot = (r) => `<span class="vdot vc ${r.cancelled ? "gray" : hueCls(r.hue)}" style="${hueStyle(r.hue)}"></span>`;
+  const nocarBtn = (attrs, on) => `<button type="button" class="vc nocar nocar-btn ${on ? "on" : ""}" ${attrs} title="Машина ещё не назначена">Нет авто</button>`;
+  // «Свой цвет»: открывает палитру браузера (квадрат оттенков, полоса цвета, ввод HEX, пипетка)
+  const customPick = (attrs, cur) => `<label class="hue-custom vc ${isHex(cur) ? "hex on" : ""}" ${isHex(cur) ? `style="${hueStyle(cur)}"` : ""} title="Выбрать любой цвет">
+    <i></i>Свой цвет<input type="color" value="${isHex(cur) ? cur : "#3b5295"}" ${attrs} aria-label="Свой цвет"></label>`;
+  const huePick = (action, id, cur, nocar) => `<div class="hue-pick">${(HUES.includes(cur) || cur === NOCAR || isHex(cur) ? HUES : [cur, ...HUES]).map((h) =>
+    `<button class="vc ${hueCls(h)} ${h === cur ? "on" : ""}" style="${hueStyle(h)}" data-action="${action}" data-id="${id}" data-h="${h}" aria-label="Выбрать этот цвет"></button>`).join("")}${
+    nocar ? nocarBtn(`data-action="${action}" data-id="${id}" data-h="${NOCAR}"`, cur === NOCAR) : ""}${
+    customPick(`data-pick="${action}" data-id="${id}"`, cur)}</div>`;
+  // в выборе — 18 оттенков: 9 основных (их раздаём автоматически) и 9 промежуточных
+  const HUES = [...PALETTE, 48, 100, 125, 165, 202, 238, 272, 308, 345].sort((a, b) => a - b);
+  const colorTitle = () => `<div class="section-t sect-row"><span>Цвет в графике</span><button class="btn sm ghost" type="button" data-action="palette">${icon("sliders")}Настроить цвета</button></div>`;
+
+  // «Цвета графика»: свой цвет для каждого из 18 оттенков и для «Нет авто» — сразу у всех заявок и машин с этим цветом
+  function openPalette() {
+    const colors = db.settings.colors || {}, list = [...HUES, NOCAR];
+    modal = { type: "palette" };
+    showModal(`<div class="modal sm">
+      <div class="modal-h"><h3>Цвета графика</h3><div class="spacer" style="flex:1"></div>
+        <button class="btn icon sm ghost" type="button" data-action="close-modal" aria-label="Закрыть">${icon("x")}</button></div>
+      <div class="modal-b">
+        <p class="small muted" style="margin:0 0 14px">Нажмите на цвет и выберите свой: он сразу поменяется у всех заявок и машин с этим цветом.</p>
+        <div class="pal-grid">${list.map((h) => `<div class="pal-item">
+          <label class="pal-sw vc ${hueCls(h)} ${h === NOCAR ? "wide" : ""}" style="${hueStyle(h)}" title="${h === NOCAR ? "Цвет «Нет авто»" : "Изменить цвет"}">${h === NOCAR ? "<span>Нет авто</span>" : ""}
+            <input type="color" value="${colors[h] || baseHex(h)}" data-palette="${h}" aria-label="${h === NOCAR ? "Цвет «Нет авто»" : "Изменить цвет"}"></label>
+          ${colors[h] ? `<button type="button" class="pal-reset" data-action="palette-reset" data-h="${h}" title="Вернуть стандартный цвет" aria-label="Вернуть стандартный цвет">${icon("restore")}</button>` : ""}
+        </div>`).join("")}</div>
+      </div>
+      <div class="modal-f">
+        ${Object.keys(colors).length ? `<button class="btn ghost" type="button" data-action="palette-reset" data-h="" style="margin-right:auto">${icon("restore")}Вернуть стандартные цвета</button>` : ""}
+        <button class="btn primary" type="button" data-action="close-modal">Готово</button>
+      </div></div>`);
+    setTimeout(() => { const b = $("#modal-layer .btn.primary"); if (b) b.focus(); }, 40);
+  }
+  // пока двигают ползунки палитры — меняется только образец; на «change» (палитра закрыта) — сохраняем и перерисовываем всё
+  function previewPalette(t) {
+    const h = t.dataset.palette === NOCAR ? NOCAR : +t.dataset.palette, lab = t.closest(".pal-sw");
+    if (h === NOCAR) { document.documentElement.style.setProperty("--nocar", t.value); document.documentElement.style.setProperty("--nocar-on", onColor(t.value)); }
+    else { lab.classList.add("hex"); lab.setAttribute("style", `--vh:0;--vx:${t.value};--c-on:${onColor(t.value)}`); }
+  }
+  function setPalette(t) {
+    db.settings.colors = { ...db.settings.colors, [t.dataset.palette]: t.value.toLowerCase() };
+    rerender();
+    openPalette();
+  }
+  // свой цвет клетки дня (оттенок, "gray", "red" — нет авто, или #rrggbb), рисуется поверх цвета строки
   const tint = (x) => (x && x.color != null
-    ? { cls: `vc tint${x.color === "gray" ? " gray" : ""}`, style: x.color === "gray" ? "" : `style="--vh:${x.color}"` }
+    ? { cls: `vc tint${x.color === "gray" ? " gray" : ""} ${hueCls(x.color)}`, style: x.color === "gray" ? `style="--c-on:initial"` : `style="${hueStyle(x.color)}"` }
     : { cls: "", style: "" });
   // новой заявке — цвет, который реже всего встречается у групп в те же даты
   function freshHue(from, to) {
@@ -437,6 +523,8 @@
 
   function customers() {
     const map = new Map();
+    // добавленные вручную — с контактами (info) и даже без заявок
+    for (const k of db.clients) map.set(k.name, { name: k.name, info: k, reqs: [] });
     for (const r of db.requests) {
       let c = map.get(r.customer);
       if (!c) map.set(r.customer, (c = { name: r.customer, reqs: [] }));
@@ -467,8 +555,8 @@
   }
   const ui = {
     req: { q: "", customer: "", month: "", status: "all", pay: "all", sort: "no", dir: 1, view: savedReqView() },
-    cal: { customer: "", cancelled: false, reanchor: false },
-    fleet: { tab: "list", month: "", group: "all" }, // месяц выставляется после загрузки данных
+    cal: { customer: "", reanchor: false },
+    fleet: { group: "all" },
     acc: { vid: null, tab: "sheets", month: "", group: "all" }, // учёт водителей: машина, вкладка книги, месяц ("" — весь период), марка
     fin: { tab: "clients", open: new Set() },
     clients: { q: "" },
@@ -515,12 +603,13 @@
       history.replaceState(null, "", "#/requests");
     }
     renderNav();
-    // кнопка в шапке: в разделе «Транспорт» добавляет машину, в остальных — заявку
-    const nb = $(".new-btn"), fleet = view.id === "fleet";
-    nb.dataset.action = fleet ? "new-vehicle" : "new-request";
-    nb.title = fleet ? "Добавить авто" : "Новая заявка";
+    // кнопка в шапке: в «Транспорте» добавляет машину, в «Заказчиках» — заказчика, в остальных — заявку
+    const nb = $(".new-btn");
+    [nb.dataset.action, nb.title] = view.id === "fleet" ? ["new-vehicle", "Добавить авто"]
+      : view.id === "clients" ? ["new-client", "Новый заказчик"] : ["new-request", "Новая заявка"];
     nb.innerHTML = `${icon("plus")}<span>${nb.title}</span>`;
     $("#page-title").textContent = view.title;
+    applyNocar();
     document.title = `${view.title} · Azim Travel CRM`;
     const scroll = window.scrollY;
     const kept = lastViewId === view.id ? $$("[data-keep-scroll]").map((el) => [el.dataset.keepScroll, el.scrollLeft, el.scrollTop]) : [];
@@ -819,12 +908,13 @@
       if (!x && !inside) return `<td class="dc nd"></td>`;
       const date = (x && x.d) || addDays(r.from, i);
       const tip = [fmtDateLong(date), x && x.route ? expandRoute(x.route) : "маршрут не указан",
-        x && x.svc.length ? svcText(x.svc) : "", x && x.cost ? fmtUsd(x.cost) : ""].filter(Boolean).join("\n");
+        x && x.svc.length ? svcText(x.svc) : "", costTip(x)].filter(Boolean).join("\n");
       const tn = tint(x);
       return `<td class="dc ${r.cancelled ? "" : "ed"} ${tn.cls} ${date === TODAY ? "today" : ""}" ${tn.style} data-day="${date}" title="${esc(tip)}"><div class="in">
         <div class="dd">${fmtDate(date)}, ${date === TODAY ? "сегодня" : dow(date)}</div>
         ${x && x.route ? `<div class="dr">${esc(x.route)}</div>` : ""}
         ${x ? x.svc.map((s) => `<div class="sv ${s.s ? svcInfo(s.s).kind : ""}">${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${esc(s.s || "")}</div>`).join("") : ""}
+        ${x ? (x.extra || []).map((e) => `<div class="sv nt">${esc(extraLabel(e))}</div>`).join("") : ""}
         ${x && x.cost ? `<div class="dm">${fmtUsd(x.cost)}</div>` : ""}
       </div></td>`;
     };
@@ -909,7 +999,7 @@
           ${info("Курс / НДС", `${fmtNum(r.rate)} сум · ${r.vat}%`)}
           ${info("Маршрут", esc(routeSummary(r.days) || "—"))}
         </div>
-        ${r.cancelled ? "" : `<div class="section-t">Цвет в графике</div>${huePick("req-hue", r.id, r.hue)}`}
+        ${r.cancelled ? "" : `${colorTitle()}${huePick("req-hue", r.id, r.hue, true)}`}
 
         <div class="section-t">Программа по дням</div>
         ${r.days.length ? `<div class="days">${r.days.map((d) => `
@@ -917,7 +1007,7 @@
             <div><div class="dn">День ${d.n}</div><div class="dd">${d.d ? `${dow(d.d)}, ${fmtDate(d.d)}` : ""}</div></div>
             <div>
               <div class="route" title="${esc(expandRoute(d.route))}">${esc(d.route || "—")}${d.d === TODAY ? '<span class="badge active plain">сегодня</span>' : ""}</div>
-              ${svcChips(d.svc) || '<span class="small muted">без трансферов</span>'}
+              ${svcChips(d.svc) || '<span class="small muted">без трансферов</span>'}${extraList(d)}
             </div>
             <div class="cost num">${d.cost ? fmtUsd(d.cost) : '<span class="muted">—</span>'}</div>
           </div>`).join("")}</div>` : `<div class="empty">Программа не заполнена</div>`}
@@ -958,9 +1048,9 @@
       customer: preset.customer || "", group: "", country: "", pax: "", transport: "", escort: "",
       from: addDays(TODAY, 7), to: addDays(TODAY, 13), rate: db.settings.rate, vat: db.settings.vat, days: [],
     };
-    modal = { type: "request-form", id, days: daySlots(src).map((d) => ({ route: d.route || "", svc: svcToText(d.svc), cost: d.cost || "", color: d.color })) };
-    const customersList = [...new Set(db.requests.map((x) => x.customer))].sort((a, b) => a.localeCompare(b, "ru"));
-    const routes = knownRoutes();
+    // в поле — цена без доп. цен; доп. цены с комментариями меняются в клетке графика и сохраняются как есть
+    modal = { type: "request-form", id, days: daySlots(src).map((d) => ({ route: d.route || "", svc: svcToText(d.svc), cost: baseCost(d) || "", color: d.color, extra: d.extra })) };
+    const customersList = [...new Set([...db.requests.map((x) => x.customer), ...db.clients.map((k) => k.name)])].sort((a, b) => a.localeCompare(b, "ru"));
     const f = (name, label, value, attrs = "", cls = "") => `<div class="field ${cls}"><label>${label}</label><input class="input" name="${name}" value="${esc(value ?? "")}" ${attrs}></div>`;
     showModal(`
       <form class="modal" data-form="request" novalidate>
@@ -981,7 +1071,7 @@
           </div>
           <div class="field" style="margin-top:6px"><span class="err" id="form-err"></span></div>
           <div class="section-t" style="margin-top:18px">Программа по дням</div>
-          <div class="small muted" style="margin-bottom:4px">Маршрут: «Таш-Сам», «Бух». Услуги через запятую: «07:40 вс аэ, экя, ужин».</div>
+          <div class="small muted" style="margin-bottom:4px">Маршрут: «Таш-Сам», «Бух». Услуги через запятую: «07:40 вс аэ, экя, ужин». Стрелки ↑ ↓ — к соседнему дню, ← → — к соседней колонке.</div>
           <div class="table-wrap"><table class="days-edit"><thead><tr><th>День</th><th>Маршрут</th><th>Услуги</th><th style="text-align:right">Стоимость, $</th></tr></thead><tbody id="days-body"></tbody></table></div>
         </div>
         <div class="modal-f">
@@ -991,7 +1081,6 @@
         </div>
         <datalist id="dl-customers">${customersList.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
         <datalist id="dl-transport">${TRANSPORT_TYPES.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
-        <datalist id="dl-routes">${routes.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
       </form>`);
     renderFormDays();
   }
@@ -1005,8 +1094,6 @@
     }
     return Array.from(slots, (d) => d || {});
   }
-  const knownRoutes = () => [...new Set([...db.requests.flatMap((x) => x.days), ...db.vehicles.flatMap((v) => v.schedule)]
-    .map((d) => d.route).filter(Boolean))].slice(0, 300);
   const svcToText = (svc) => (svc || []).map((s) => [s.t, s.s].filter(Boolean).join(" ")).join(", ");
   function textToSvc(text) {
     return String(text || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
@@ -1041,14 +1128,16 @@
     body.innerHTML = Array.from({ length: n }, (_, i) => {
       const d = addDays(from, i), x = modal.days[i];
       return `<tr><td class="dlabel">День ${i + 1}<br><span class="muted">${dow(d)}, ${fmtDate(d)}</span></td>
-        <td><input class="input" name="route" list="dl-routes" value="${esc(x.route)}" placeholder="Таш-Сам"></td>
+        <td><input class="input" name="route" autocomplete="off" value="${esc(x.route)}" placeholder="Таш-Сам"></td>
         <td><input class="input" name="svc" value="${esc(x.svc)}" ${i === 0 ? 'placeholder="07:40 вс аэ, экя"' : ""}></td>
-        <td><input class="input cost-in num" name="cost" type="number" min="0" step="any" value="${esc(x.cost)}"></td></tr>`;
+        <td><input class="input cost-in num" name="cost" type="number" min="0" step="any" value="${esc(x.cost)}">${x.extra && x.extra.length
+          ? `<div class="xhint num" title="${esc(x.extra.map(extraLabel).join("\n"))}">${extraSum(x) ? `${extraSum(x) > 0 ? "+" : ""}${fmtUsd(extraSum(x))} доп.` : "есть комментарий"}</div>` : ""}</td></tr>`;
     }).join("");
     updateFormTotal();
   }
   function updateFormTotal() {
-    const total = $$("#days-body [name=cost]").reduce((s, i) => s + (+i.value || 0), 0);
+    const ins = $$("#days-body [name=cost]");
+    const total = ins.reduce((s, i) => s + (+i.value || 0), 0) + modal.days.slice(0, ins.length).reduce((s, x) => s + extraSum(x), 0);
     $("#form-total").textContent = `Итого: ${fmtUsd(total)}`;
   }
   function submitRequestForm(form) {
@@ -1064,9 +1153,10 @@
     if (diffDays(v("from"), v("to")) > MAX_TOUR_DAYS - 1) return bad("to", "Проверьте год: тур получается длиннее года");
     const n = diffDays(v("from"), v("to")) + 1;
     const days = modal.days.slice(0, n).map((x, i) => ({
-      n: i + 1, d: addDays(v("from"), i), route: x.route.trim() || null, svc: textToSvc(x.svc), cost: +x.cost || 0,
+      n: i + 1, d: addDays(v("from"), i), route: x.route.trim() || null, svc: textToSvc(x.svc), cost: cents((+x.cost || 0) + extraSum(x)),
       ...(x.color != null && { color: x.color }),
-    })).filter((d) => d.route || d.svc.length || d.cost || d.color != null);
+      ...(x.extra && x.extra.length && { extra: x.extra }),
+    })).filter((d) => d.route || d.svc.length || d.cost || d.color != null || d.extra);
     const fields = {
       customer: v("customer"), group: v("group") || null, country: v("country") || null, ...parsePax(v("pax")),
       transport: v("transport") || null, escort: v("escort") || null, from: v("from"), to: v("to"),
@@ -1102,7 +1192,7 @@
     // день заявки листается только в её датах, у машины — без ограничений
     const lo = kind === "req" ? x.from : null, hi = kind === "req" ? x.to || x.from : null;
     const step = (n, label, ic, off) => `<button class="btn icon sm ghost" type="button" data-action="cell-step" data-step="${n}" aria-label="${label}" title="${label}" ${off ? "disabled" : ""}>${icon(ic)}</button>`;
-    const sw = (c, label) => `<button type="button" class="vc ${c === "gray" ? "gray" : ""} ${day.color === c ? "on" : ""}" ${c === "gray" ? "" : `style="--vh:${c}"`}
+    const sw = (c, label) => `<button type="button" class="vc ${c === "gray" ? "gray" : hueCls(c)} ${day.color === c ? "on" : ""}" ${c === "gray" ? "" : `style="${hueStyle(c)}"`}
       data-action="cell-color" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
     modal = { type: "cell", kind, id, d };
     showModal(`
@@ -1118,18 +1208,25 @@
         </div>
         <div class="modal-b">
           <div class="form-grid" style="grid-template-columns:minmax(0,1fr) 120px">
-            <div class="field"><label>Маршрут</label><input class="input" name="route" list="dl-routes" autocomplete="off" value="${esc(day.route || "")}" placeholder="Бух-Сам"></div>
-            <div class="field"><label>Стоимость, $</label><input class="input num" name="cost" type="number" min="0" step="any" value="${day.cost || ""}"></div>
+            <div class="field"><label>Маршрут</label><input class="input" name="route" autocomplete="off" value="${esc(day.route || "")}" placeholder="Бух-Сам"></div>
+            <div class="field"><label>Стоимость, $</label><input class="input num" name="cost" type="number" min="0" step="any" value="${baseCost(day) || ""}"></div>
             <div class="field span4"><label>Услуги</label><input class="input" name="svc" autocomplete="off" value="${esc(svcToText(day.svc))}" placeholder="07:40 вс аэ, экя, ужин"></div>
+            <div class="field span4"><label>Доп. цены и комментарии</label>
+              <div class="extra-list" id="cell-extra">${(day.extra || []).map(extraRow).join("")}</div>
+              <div class="extra-f">
+                <button class="btn sm" type="button" data-action="cell-extra-add">${icon("plus")}Цена и комментарий</button>
+                <span class="num" id="cell-total"></span>
+              </div>
+            </div>
             <div class="field span4"><label>Цвет клетки</label>
               <div class="hue-pick cell-colors">
-                <button type="button" class="auto vc ${kind === "veh" && x.partner ? "gray" : ""} ${day.color == null ? "on" : ""}" style="--vh:${x.hue}" data-action="cell-color" data-c=""><span class="vdot"></span>${kind === "req" ? "Как у заявки" : "Как у машины"}</button>
-                ${HUES.map((h) => sw(h, "Свой цвет")).join("")}${sw("gray", "Серый")}
+                <button type="button" class="auto vc ${kind === "veh" && x.partner ? "gray" : hueCls(x.hue)} ${day.color == null ? "on" : ""}" style="${hueStyle(x.hue)}" data-action="cell-color" data-c=""><span class="vdot"></span>${kind === "req" ? "Как у заявки" : "Как у машины"}</button>
+                ${HUES.map((h) => sw(h, "Свой цвет")).join("")}${sw("gray", "Серый")}${kind === "req" ? nocarBtn(`data-action="cell-color" data-c="${NOCAR}"`, day.color === NOCAR) : ""}${customPick(`data-pick="cell-color"`, day.color)}
               </div>
               <input type="hidden" name="color" value="${day.color ?? ""}">
             </div>
           </div>
-          <p class="small muted" style="margin:10px 0 0">Услуги через запятую, время — в начале. Стрелки вверху сохраняют день и переходят к соседнему.</p>
+          <p class="small muted" style="margin:10px 0 0">Услуги через запятую, время — в начале. Доп. цены входят в итог дня. Стрелки вверху сохраняют день и переходят к соседнему.</p>
         </div>
         <div class="modal-f">
           <button class="btn ghost" type="button" data-action="cell-open" style="margin-right:auto">${kind === "req" ? "Карточка заявки" : "Карточка машины"}</button>
@@ -1137,18 +1234,35 @@
           <button class="btn" type="button" data-action="close-modal">Отмена</button>
           <button class="btn primary" type="submit">Сохранить</button>
         </div>
-        <datalist id="dl-routes">${knownRoutes().map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
       </form>`);
+    updateCellTotal();
     setTimeout(() => { const i = $("#modal-layer [name=route]"); if (i) i.select(); }, 40);
+  }
+  // строка доп. цены в клетке: сумма в USD и комментарий
+  const extraRow = (e = {}) => `<div class="extra-row">
+    <input class="input num" name="xusd" type="number" step="any" value="${e.usd ?? ""}" placeholder="$" aria-label="Цена, $">
+    <input class="input" name="xnote" value="${esc(e.note || "")}" placeholder="Комментарий" autocomplete="off" aria-label="Комментарий">
+    <button class="btn icon sm ghost" type="button" data-action="cell-extra-del" aria-label="Убрать строку" title="Убрать строку">${icon("trash")}</button>
+  </div>`;
+  const readExtra = (form) => $$(".extra-row", form)
+    .map((row) => ({ usd: +$("[name=xusd]", row).value || 0, note: $("[name=xnote]", row).value.trim() }))
+    .filter((e) => e.usd || e.note)
+    .map((e) => ({ ...(e.usd && { usd: e.usd }), ...(e.note && { note: e.note }) }));
+  function updateCellTotal() {
+    const form = $("form[data-form=cell]"), out = $("#cell-total");
+    if (!form || !out) return;
+    const extra = readExtra(form);
+    out.textContent = extra.some((e) => e.usd) ? `Итого за день: ${fmtUsd((+form.elements.cost.value || 0) + extraSum({ extra }))}` : "";
   }
   function saveCell(form) {
     const { kind, id, d } = modal, x = cellOwner(kind, id), list = cellList(kind, x), el = form.elements;
-    const val = { route: el.route.value.trim() || null, svc: textToSvc(el.svc.value), cost: +el.cost.value || 0 };
-    const c = el.color.value, color = c === "" ? null : c === "gray" ? "gray" : +c;
+    const extra = readExtra(form);
+    const val = { route: el.route.value.trim() || null, svc: textToSvc(el.svc.value), cost: cents((+el.cost.value || 0) + extraSum({ extra })) };
+    const c = el.color.value, color = c === "" ? null : c === "gray" ? "gray" : parseHue(c);
     const i = list.findIndex((y) => y.d === d), old = list[i];
     const oldColor = (old && old.color) ?? null;
-    const empty = !val.route && !val.svc.length && !val.cost && color == null;
-    if (old ? JSON.stringify([old.route, old.svc, old.cost || 0, oldColor]) === JSON.stringify([val.route, val.svc, val.cost, color]) : empty) return;
+    const empty = !val.route && !val.svc.length && !val.cost && color == null && !extra.length;
+    if (old ? JSON.stringify([old.route, old.svc, old.cost || 0, oldColor, old.extra || []]) === JSON.stringify([val.route, val.svc, val.cost, color, extra]) : empty) return;
     if (empty) list.splice(i, 1);
     else {
       let day = old;
@@ -1159,11 +1273,14 @@
       }
       Object.assign(day, val);
       if (color == null) delete day.color; else day.color = color;
+      // доп. цены — последним полем, как в форме заявки
+      delete day.extra;
+      if (extra.length) day.extra = extra;
     }
     if (kind === "req") x.total = x.days.reduce((s, y) => s + (y.cost || 0), 0);
     const recolor = oldColor !== color ? (color == null ? "цвет по умолчанию" : "свой цвет") : "";
     (x.log || (x.log = [])).push({ ts: nowStamp(), text: empty ? `Очищен день ${fmtDate(d)}`
-      : `Изменён день ${fmtDate(d)}: ${[val.route, svcToText(val.svc), val.cost && fmtUsd(val.cost), recolor].filter(Boolean).join(" · ")}` });
+      : `Изменён день ${fmtDate(d)}: ${[val.route, svcToText(val.svc), val.cost && fmtUsd(val.cost), ...extra.map(extraLabel), recolor].filter(Boolean).join(" · ")}` });
     toast("Сохранено");
     rerender();
   }
@@ -1264,8 +1381,9 @@
     return f.y === l.y ? `${MONTHS[f.m - 1]} – ${MONTHS[l.m - 1].toLowerCase()} ${f.y}` : `${MONTHS[f.m - 1]} ${f.y} – ${MONTHS[l.m - 1].toLowerCase()} ${l.y}`;
   }
   // клетка ленты: маршрут, услуги со временем, внизу — цена за день
-  const dayCell = (route, svc, cost) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) =>
-    `<span class="sl">${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`).join("")}${cost ? `<span class="pr">${fmtUsd(cost)}</span>` : ""}`;
+  const dayCell = (route, svc, cost, extra) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) =>
+    `<span class="sl">${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`).join("")}${(extra || []).map((e) =>
+    `<span class="sl nt">${esc(extraLabel(e))}</span>`).join("")}${cost ? `<span class="pr">${fmtUsd(cost)}</span>` : ""}`;
   // ширины колонок заданы заранее (table-layout: fixed), чтобы не зависели от текста и загрузки шрифта
   function ribbonHead(rg, label) {
     return `<colgroup><col class="c-rowh">${'<col class="c-day">'.repeat(rg.dates.length)}</colgroup>
@@ -1315,42 +1433,41 @@
   /* ================= График заявок ================= */
   function viewCalendar() {
     const c = ui.cal;
-    const rg = ribbons.cal = ribbonRange(db.requests.flatMap((r) => [r.from, r.to]));
-    const names = [...new Set(db.requests.map((r) => r.customer))].sort((a, b) => a.localeCompare(b, "ru"));
-    const rows = db.requests
+    // аннулированные заявки в график не попадают: ни строки, ни период, ни заказчики в фильтре
+    const live = db.requests.filter((r) => !r.cancelled);
+    const rg = ribbons.cal = ribbonRange(live.flatMap((r) => [r.from, r.to]));
+    const names = [...new Set(live.map((r) => r.customer))].sort((a, b) => a.localeCompare(b, "ru"));
+    const rows = live
       .filter((r) => r.from)
-      .filter((r) => c.cancelled || !r.cancelled)
       .filter((r) => !c.customer || r.customer === c.customer)
       .sort((a, b) => a.from.localeCompare(b.from) || a.no - b.no);
-    const pax = rows.filter((r) => !r.cancelled).reduce((s, r) => s + (r.pax || 0), 0);
+    const pax = rows.reduce((s, r) => s + (r.pax || 0), 0);
 
     return `
       <div class="tl-head">
         ${ribbonNav("cal", rg)}
         <select class="input" style="width:auto" data-cal="customer"><option value="">Все заказчики</option>${names.map((n) => `<option ${n === c.customer ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
-        <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-cal="cancelled" ${c.cancelled ? "checked" : ""}>Аннулированные</label>
       </div>
       <div class="card">
         <div class="card-h wrap">
           <h2>${rangeTitle(rg)}</h2>
           <span class="sub">${rows.length} ${plural(rows.length, "заявка", "заявки", "заявок")} · ${fmtNum(pax)} туристов</span>
           <div class="spacer"></div>
-          <div class="legend"><span>У каждой заявки свой цвет</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span><i style="background:var(--today);border:1px solid var(--accent)"></i>Сегодня</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить день или цвет</span></div>
+          <div class="legend"><span>У каждой заявки свой цвет</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span><i class="vc nocar" style="background:var(--c-solid)"></i>Нет авто</span><span><i style="background:var(--today);border:1px solid var(--accent)"></i>Сегодня</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить день или цвет</span></div>
         </div>
         <div class="tl-wrap" data-keep-scroll="cal">
           ${rows.length ? `<table class="tl tl-period" style="--days:${rg.dates.length}">${ribbonHead(rg, "Заявка")}
           <tbody>${rows.map((r) => {
             const byDate = new Map(r.days.map((d) => [d.d, d]));
             const to = r.to || r.from;
-            return `<tr class="vc ${r.cancelled ? "gray" : ""}" style="--vh:${r.hue}" data-from="${r.from}" data-to="${to}" data-cell="req" data-id="${r.id}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, paxOf(r) && paxOf(r) + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
+            return `<tr class="vc ${hueCls(r.hue)}" style="${hueStyle(r.hue)}" data-from="${r.from}" data-to="${to}" data-cell="req" data-id="${r.id}"><td class="rowh" data-open-request="${r.id}"><div class="t1">${rdot(r)}№${r.no} · ${esc(r.customer)}</div><div class="t2">${esc([r.group, paxOf(r) && paxOf(r) + " чел.", r.transport].filter(Boolean).join(" · ") || "—")}</div></td>
               ${rg.dates.map((d, i) => {
                 if (d < r.from || d > to) return `<td class="tday ${rg.colCls[i]}"></td>`;
                 const x = byDate.get(d);
-                const tip = `№${r.no} ${r.customer}\n${fmtDateLong(d)}\n${x && x.route ? expandRoute(x.route) : "маршрут не указан"}${x && x.svc.length ? "\n" + svcText(x.svc) : ""}${x && x.cost ? `\n${fmtUsd(x.cost)}` : ""}${r.cancelled ? "" : "\n\nНажмите, чтобы изменить"}`;
+                const tip = `№${r.no} ${r.customer}\n${fmtDateLong(d)}\n${x && x.route ? expandRoute(x.route) : "маршрут не указан"}${x && x.svc.length ? "\n" + svcText(x.svc) : ""}${costTip(x) ? "\n" + costTip(x) : ""}\n\nНажмите, чтобы изменить`;
                 const moving = x && x.route && x.route.includes("-");
-                // аннулированная заявка не редактируется по клеткам — открывается карточка
                 const tn = tint(x);
-                return `<td class="tday on ${r.cancelled ? "" : "ed"} ${tn.cls} ${rg.colCls[i]}" ${tn.style} ${r.cancelled ? `data-open-request="${r.id}"` : ""} title="${esc(tip)}"><div class="cellbar ${r.cancelled ? "cx" : moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc, x && x.cost)}</div></td>`;
+                return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar ${moving ? "v" : "v l1"} ${d === r.from ? "s" : ""} ${d === to ? "e" : ""}">${dayCell(x && x.route, x && x.svc, x && x.cost, x && x.extra)}</div></td>`;
               }).join("")}</tr>`;
           }).join("")}</tbody></table>` : `<div class="empty">Заявок не найдено</div>`}
         </div>
@@ -1371,59 +1488,18 @@
   }
 
   /* ================= Транспорт ================= */
-  const fleetTabs = () => `<div class="seg">${[["list", "Список"], ["chart", "График по дням"]].map(([v, l]) =>
-    `<button class="${ui.fleet.tab === v ? "on" : ""}" data-action="fleet-tab" data-v="${v}">${l}</button>`).join("")}</div>`;
-
+  // «Транспорт» — график машин по дням одной лентой (показатели и список убраны); карточка машины открывается из строки графика
   function viewFleet() {
-    const f = ui.fleet, m = f.month, dim = daysInMonth(m);
-    const all = db.vehicles;
+    const f = ui.fleet, all = db.vehicles;
     const list = all.filter((v) => f.group === "all" || vehGroup(v) === f.group);
-    const active = all.filter((v) => !v.sold);
-    const onRoute = active.filter((v) => vehOn(v, TODAY));
-    const own = active.filter((v) => !v.partner);
-    const avg = own.length ? own.reduce((s, v) => s + vehDaysIn(v, m), 0) / (own.length * dim) : 0;
-    const totalCost = all.reduce((s, v) => s + vehCost(v), 0);
-    const totalDue = all.reduce((s, v) => s + Math.max(0, vehDue(v)), 0);
     const groups = [["all", "Все"], ["asiastar", "ASIASTAR"], ["eurise", "EURISE"], ["partner", "Частные"]];
-    const rg = f.tab === "chart" ? (ribbons.fleet = ribbonRange(all.flatMap((v) => v.schedule.map((x) => x.d)))) : null;
-
+    const rg = ribbons.fleet = ribbonRange(all.flatMap((v) => v.schedule.map((x) => x.d)));
     return `
-      <div class="grid kpis">
-        ${kpi("Единиц транспорта", active.length, `${own.length} ${plural(own.length, "автобус", "автобуса", "автобусов")} · ${active.length - own.length} частных`)}
-        ${kpi("В рейсе сегодня", onRoute.length, `свободно ${active.length - onRoute.length}`)}
-        ${kpi(`Загрузка · ${monthLabel(m).toLowerCase()}`, Math.round(avg * 100) + "%", "в среднем по автобусам")}
-        ${kpi("Начислено перевозчикам", money(totalCost), periodText())}
-        ${kpi("Остаток к оплате", money(totalDue), `выплачено ${fmtUsd(all.reduce((x, v) => x + paidOf(v), 0))}`)}
-      </div>
-      <div class="toolbar">
-        ${fleetTabs()}
+      <div class="tl-head">
+        ${ribbonNav("fleet", rg)}
         <div class="seg">${groups.map(([v, l]) => `<button class="${f.group === v ? "on" : ""}" data-action="fleet-group" data-v="${v}">${l}<span class="c">${all.filter((x) => v === "all" || vehGroup(x) === v).length}</span></button>`).join("")}</div>
-        <div class="grow"></div>
-        ${f.tab === "chart" ? ribbonNav("fleet", rg)
-          : `<select class="input" data-fleet="month">${monthOptions(m)}</select>`}
       </div>
-      ${f.tab === "list" ? fleetTable(list, m, dim) : fleetChart(list, rg)}`;
-  }
-
-  function fleetTable(list, m, dim) {
-    return `<div class="card"><div class="table-wrap"><table class="t">
-      <thead><tr><th>№</th><th>Транспорт</th><th>Сегодня</th><th class="r">Дней в работе</th><th>Загрузка · ${monthShort(m)}</th><th class="r">Начислено</th><th class="r">Оплачено</th><th class="r">Остаток</th></tr></thead>
-      <tbody>${list.map((v) => {
-        const t = vehOn(v, TODAY), d = vehDaysIn(v, m), due = vehDue(v);
-        return `<tr class="clickable ${v.sold ? "cancelled" : ""}" data-open-vehicle="${v.id}">
-          <td class="num muted">${v.no}</td>
-          <td><div class="cell-main">${vdot(v)}${esc(vehTitle(v))}</div><div class="cell-sub">${esc(vehSub(v))}</div></td>
-          <td>${v.sold ? '<span class="badge sold">Продан</span>' : t ? `<span class="badge active">${esc(t.route || "в работе")}</span>` : '<span class="badge plain">свободен</span>'}</td>
-          <td class="r num">${v.schedule.length}</td>
-          <td><div style="display:flex;align-items:center;gap:8px"><div class="meter" style="flex:1;max-width:120px"><i style="width:${(d / dim) * 100}%"></i></div><span class="small num muted">${d}/${dim}</span></div></td>
-          <td class="r num">${fmtUsd(vehCost(v))}</td>
-          <td class="r num">${fmtUsd(paidOf(v))}</td>
-          <td class="r num" style="font-weight:600;${due < -1 ? "color:var(--violet)" : ""}">${fmtUsd(due)}</td>
-        </tr>`;
-      }).join("")}</tbody>
-      <tfoot><tr><td colspan="3">Итого: ${list.length}</td><td class="r num">${fmtNum(list.reduce((s, v) => s + v.schedule.length, 0))}</td><td></td>
-        <td class="r num">${fmtUsd(list.reduce((s, v) => s + vehCost(v), 0))}</td><td class="r num">${fmtUsd(list.reduce((s, v) => s + paidOf(v), 0))}</td><td class="r num">${fmtUsd(list.reduce((s, v) => s + vehDue(v), 0))}</td></tr></tfoot>
-    </table></div></div>`;
+      ${fleetChart(list, rg)}`;
   }
 
   function fleetChart(list, rg) {
@@ -1433,22 +1509,22 @@
       <div class="tl-wrap" data-keep-scroll="fleet"><table class="tl tl-period" style="--days:${rg.dates.length}">${ribbonHead(rg, "Транспорт")}
       <tbody>${rows.map((v) => {
         const by = new Map(v.schedule.map((x) => [x.d, x]));
-        return `<tr class="vc ${v.partner ? "gray" : ""}" style="--vh:${v.hue}" data-cell="veh" data-id="${v.id}"><td class="rowh" data-open-vehicle="${v.id}"><div class="t1">${vdot(v)}${esc(vehTitle(v))}</div><div class="t2">${esc([vehSub(v), v.schedule.length + " дн."].filter((x) => x !== "—").join(" · "))}</div></td>
+        return `<tr class="vc ${v.partner ? "gray" : hueCls(v.hue)}" style="${hueStyle(v.hue)}" data-cell="veh" data-id="${v.id}"><td class="rowh" data-open-vehicle="${v.id}"><div class="t1">${vdot(v)}${esc(vehTitle(v))}</div><div class="t2">${esc([vehSub(v), v.schedule.length + " дн."].filter((x) => x !== "—").join(" · "))}</div></td>
           ${rg.dates.map((d, i) => {
             const x = by.get(d);
             // пустая клетка: клик добавляет рейс (у проданной машины — нет)
             if (!x) return `<td class="tday ${v.sold ? "" : "ed add"} ${rg.colCls[i]}"></td>`;
             const prev = by.get(addDays(d, -1)), next = by.get(addDays(d, 1));
             const moving = x.route && x.route.includes("-");
-            const tip = `${vehTitle(v)}\n${fmtDateLong(d)}\n${x.route ? expandRoute(x.route) : "—"}${x.svc.length ? "\n" + svcText(x.svc) : ""}${x.cost ? "\n" + fmtUsd(x.cost) : ""}\n\nНажмите, чтобы изменить`;
+            const tip = `${vehTitle(v)}\n${fmtDateLong(d)}\n${x.route ? expandRoute(x.route) : "—"}${x.svc.length ? "\n" + svcText(x.svc) : ""}${costTip(x) ? "\n" + costTip(x) : ""}\n\nНажмите, чтобы изменить`;
             const tn = tint(x);
-            return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc, x.cost)}</div></td>`;
+            return `<td class="tday on ed ${tn.cls} ${rg.colCls[i]}" ${tn.style} title="${esc(tip)}"><div class="cellbar v ${moving ? "" : "l1"} ${!prev ? "s" : ""} ${!next ? "e" : ""}">${dayCell(x.route, x.svc, x.cost, x.extra)}</div></td>`;
           }).join("")}</tr>`;
       }).join("")}</tbody></table></div></div>`;
   }
 
   function fleetAfter(restored) {
-    if (ui.fleet.tab !== "chart" || !rbWrap("fleet")) return;
+    if (!rbWrap("fleet")) return;
     if (!restored.has("fleet")) {
       // если сегодня есть рейсы — к сегодняшнему дню, иначе к началу последнего заполненного месяца
       const m = fleetMonth();
@@ -1617,7 +1693,7 @@
     const all = routeSheets(v), list = all.filter((s) => !m || inMonth(s.from, m));
     if (!list.length) return `<div class="card"><div class="empty">${all.length ? `За ${periodLabel(m)} маршрутных листов нет` : "Рейсов пока нет — добавьте их в «График по дням»"}</div></div>`;
     const N = accNorm(), idx = reqIndex();
-    return `<div class="note-box acc-note">${icon("edit")}<span>Маршрутный лист — это подряд идущие дни в графике машины. Суммы вводите прямо в таблицу, Enter — на строку ниже.
+    return `<div class="note-box acc-note">${icon("edit")}<span>Маршрутный лист — это подряд идущие дни в графике машины. Суммы вводите прямо в таблицу, Enter или ↓ — на строку ниже, ↑ — выше, ← → — к соседней колонке.
       Серым показана норма из настроек; «Заполнить по норме» подставит её в пустые клетки. ${icon("scissors")} у дня — начать с него новый лист.</span></div>`
       + list.map((s) => accSheetCard(v, s, all, N, idx)).join("");
   }
@@ -1649,7 +1725,9 @@
           <td>${ain(`d|${x.d}|food`, x.food, { ph: numIn(N.food), col: "food" })}</td>
           <td>${ain(`d|${x.d}|car`, x.car, { col: "car" })}</td>
           <td>${ain(`d|${x.d}|kom`, x.kom, { ph: numIn(N.kom), col: "kom" })}</td>
-          <td>${ain(`d|${x.d}|cost`, x.cost, { col: "cost" })}</td>
+          <td>${x.extra && x.extra.length ? `<div class="ai-x">${ain(`d|${x.d}|cost`, baseCost(x), { col: "cost" })}<button class="xbadge num" data-action="acc-cell" data-d="${x.d}"
+            title="${esc(x.extra.map(extraLabel).join("\n"))}\n\nНажмите, чтобы изменить">${extraSum(x) ? `${extraSum(x) > 0 ? "+" : ""}${fmtUsd(extraSum(x))}` : "комм."}</button></div>`
+            : ain(`d|${x.d}|cost`, x.cost, { col: "cost" })}</td>
           <td>${ain(`d|${x.d}|co`, x.co, { ph: dayCompany(x, idx), txt: true, col: "co" })}</td></tr>`).join("")}</tbody>
         <tfoot><tr><td colspan="4">Итого за маршрут</td><td class="r num">${fmtNum(s.hotel)}</td><td class="r num">${fmtNum(s.food)}</td><td class="r num">${fmtNum(s.car)}</td>
           <td class="r num">${fmtUsd(s.kom)}</td><td class="r num">${fmtUsd(s.cost)}</td><td></td></tr></tfoot>
@@ -1797,7 +1875,9 @@
     else if (kind === "s") { const a = accOf(v); obj = a.sheets[k] || (a.sheets[k] = {}); }
     else obj = accOf(v)[kind][+k];
     if (!obj) return;
-    if (val === "" || val == null) delete obj[f]; else obj[f] = val;
+    // цена услуг дня с доп. ценами: в поле — цена без них, в дне хранится итог
+    if (kind === "d" && f === "cost" && obj.extra && obj.extra.length) obj.cost = cents((val || 0) + extraSum(obj));
+    else if (val === "" || val == null) delete obj[f]; else obj[f] = val;
     if (kind === "s" && !Object.keys(obj).length) delete accOf(v).sheets[k];
     // выплата: USD = сумма в сумах / курс (как формула в Excel); USD можно вписать и вручную
     if (kind === "pay" && (f === "uzs" || f === "rate") && obj.uzs && obj.rate) obj.usd = Math.round((obj.uzs / obj.rate) * 100) / 100;
@@ -1839,7 +1919,7 @@
           ${info("Дней в работе", v.schedule.length)}
           ${info("Средняя ставка в день", v.schedule.length ? fmtUsd(cost / v.schedule.length) : "—")}
         </div>
-        ${v.partner ? "" : `<div class="section-t">Цвет в графике</div>${huePick("veh-hue", v.id, v.hue)}`}
+        ${v.partner ? "" : `${colorTitle()}${huePick("veh-hue", v.id, v.hue)}`}
         <div class="section-t">Взаиморасчёты с перевозчиком</div>
         <div class="money">
           <div><div class="k">Начислено</div><div class="v num">${fmtUsd(cost)}</div></div>
@@ -1859,7 +1939,7 @@
         <div class="section-t">График работы</div>
         ${byMonth.length ? byMonth.map((g) => `<div style="margin-bottom:14px"><div style="font-weight:600;margin-bottom:6px">${monthLabel(g.m)} · ${g.items.length} дн. · ${fmtUsd(g.items.reduce((s, x) => s + x.cost, 0))}</div>
           <div class="days">${g.items.map((x) => `<div class="day ${x.d === TODAY ? "is-today" : ""}"><div><div class="dn">${fmtDate(x.d)}</div><div class="dd">${dow(x.d)}</div></div>
-            <div><div class="route" title="${esc(expandRoute(x.route))}">${esc(x.route || "—")}</div>${svcChips(x.svc)}</div><div class="cost num">${x.cost ? fmtUsd(x.cost) : "—"}</div></div>`).join("")}</div></div>`).join("")
+            <div><div class="route" title="${esc(expandRoute(x.route))}">${esc(x.route || "—")}</div>${svcChips(x.svc)}${extraList(x)}</div><div class="cost num">${x.cost ? fmtUsd(x.cost) : "—"}</div></div>`).join("")}</div></div>`).join("")
           : `<div class="empty">В графике нет рабочих дней</div>`}
       </div>`;
   }
@@ -1938,13 +2018,11 @@
       <div class="toolbar">
         <input class="input search-inline" type="search" placeholder="Найти заказчика…" value="${esc(ui.clients.q)}" data-clients="q">
         <span class="muted small">${list.length} ${plural(list.length, "заказчик", "заказчика", "заказчиков")}</span>
-        <div class="grow"></div>
-        <button class="btn primary" data-action="new-request">${icon("plus")}Новая заявка</button>
       </div>
       <div class="grid client-cards">
         ${list.map((c) => `<div class="card client-card" data-open-client="${esc(c.name)}">
           <div class="top"><div class="avatar">${esc(initials(c.name))}</div><div style="min-width:0"><div class="nm">${esc(c.name)}</div>
-            <div class="small muted">${c.count} ${plural(c.count, "заявка", "заявки", "заявок")}${c.pax ? ` · ${fmtNum(c.pax)} ${plural(c.pax, "турист", "туриста", "туристов")}` : ""}</div></div></div>
+            <div class="small muted">${c.count} ${plural(c.count, "заявка", "заявки", "заявок")}${c.pax ? ` · ${fmtNum(c.pax)} ${plural(c.pax, "турист", "туриста", "туристов")}` : ""}${c.info && c.info.phone ? ` · ${esc(c.info.phone)}` : ""}</div></div></div>
           <div class="stats">
             <div><div class="k">Начислено</div><div class="v num">${fmtUsd(c.total)}</div></div>
             <div><div class="k">Оплачено</div><div class="v num">${fmtUsd(c.paid)}</div></div>
@@ -1964,7 +2042,8 @@
           <div><h3>${esc(c.name)}</h3><div class="sub">Заказчик · ${c.count} ${plural(c.count, "заявка", "заявки", "заявок")}${c.cancelled ? ` · ${c.cancelled} аннул.` : ""}</div></div></div>
         <div class="actions">
           <button class="btn sm primary" data-action="new-request" data-customer="${esc(c.name)}">${icon("plus")}Заявка</button>
-          <button class="btn sm" data-action="print-statement" data-name="${esc(c.name)}">${icon("printer")}Акт сверки</button>
+          <button class="btn sm" data-action="edit-client" data-name="${esc(c.name)}">${icon("edit")}Изменить</button>
+          ${c.reqs.length ? `<button class="btn sm" data-action="print-statement" data-name="${esc(c.name)}">${icon("printer")}Акт сверки</button>` : ""}
           <button class="btn icon sm ghost" data-action="close-drawer" aria-label="Закрыть">${icon("x")}</button>
         </div>
       </div>
@@ -1978,17 +2057,62 @@
           ${info("Туристов", fmtNum(c.pax))}
           ${info("Страны", esc(c.countries.join(", ") || "—"))}
           ${info("Следующий заезд", c.next ? `${fmtDateLong(c.next.from)}` : "—")}
+          ${info("Телефон", c.info && c.info.phone ? `<a href="tel:${esc(c.info.phone.replace(/[^\d+]/g, ""))}">${esc(c.info.phone)}</a>` : "—")}
+          ${c.info && c.info.note ? `<div style="grid-column:span 2"><div class="k">Комментарий</div><div class="v" style="white-space:pre-line;font-weight:400">${esc(c.info.note)}</div></div>` : ""}
         </div>
         <div class="section-t">Заявки</div>
-        <div class="card" style="box-shadow:none"><div class="table-wrap"><table class="t">
+        ${reqs.length ? "" : `<div class="empty">Заявок пока нет. Первую можно создать кнопкой «Заявка» вверху.</div>`}
+        ${!reqs.length ? "" : `<div class="card" style="box-shadow:none"><div class="table-wrap"><table class="t">
           <thead><tr><th>№</th><th>Группа</th><th>Даты</th><th class="r">Тур.</th><th class="r">Сумма</th><th class="r">Остаток</th><th>Статус</th></tr></thead>
           <tbody>${reqs.map((r) => `<tr class="clickable ${r.cancelled ? "cancelled" : ""}" data-open-request="${r.id}">
             <td class="num muted">${r.no}</td><td>${esc(r.group || "—")}<div class="cell-sub">${esc(routeSummary(r.days))}</div></td>
             <td class="nowrap">${fmtRange(r.from, r.to)}</td><td class="r num">${esc(paxOf(r)) || "—"}</td>
             <td class="r num">${fmtUsd(r.total || 0)}</td><td class="r num">${fmtUsd(dueOf(r))}</td>
             <td><span class="badge ${reqStatus(r)}">${STATUS[reqStatus(r)]}</span></td></tr>`).join("")}</tbody>
-        </table></div></div>
+        </table></div></div>`}
       </div>`;
+  }
+
+  // заказчик, добавленный вручную: название, телефон, комментарий. Название меняется, только пока у заказчика нет заявок
+  function openClientForm(name) {
+    const c = name ? customers().find((x) => x.name === name) : null, k = (c && c.info) || {};
+    const locked = !!(c && c.reqs.length);
+    modal = { type: "client-form", name };
+    showModal(`
+      <form class="modal sm" data-form="client" novalidate>
+        <div class="modal-h"><h3>${c ? "Изменить заказчика" : "Новый заказчик"}</h3><div class="spacer" style="flex:1"></div>
+          <button class="btn icon sm ghost" type="button" data-action="close-modal" aria-label="Закрыть">${icon("x")}</button></div>
+        <div class="modal-b">
+          <div class="form-grid" style="grid-template-columns:1fr">
+            <div class="field"><label>Название *</label><input class="input" name="name" value="${esc(c ? c.name : "")}" autocomplete="off" placeholder="Мега Тур" ${locked ? "disabled" : "required"}>
+              ${locked ? `<span class="small muted">У заказчика есть заявки, поэтому название меняется в самих заявках.</span>` : ""}</div>
+            <div class="field"><label>Телефон</label><input class="input" name="phone" type="tel" value="${esc(k.phone || "")}" autocomplete="off" placeholder="+998 90 123 45 67"></div>
+            <div class="field"><label>Комментарий</label><textarea class="input" name="note" rows="3" placeholder="Контактное лицо, страна, условия оплаты">${esc(k.note || "")}</textarea></div>
+          </div>
+          <div class="field" style="margin-top:6px"><span class="err" id="form-err"></span></div>
+        </div>
+        <div class="modal-f">
+          ${c && c.info && !c.reqs.length ? `<button class="btn danger" type="button" data-action="del-client" data-name="${esc(c.name)}" style="margin-right:auto">${icon("trash")}Удалить</button>` : ""}
+          <button class="btn" type="button" data-action="close-modal">Отмена</button>
+          <button class="btn primary" type="submit">${c ? "Сохранить" : "Добавить"}</button>
+        </div>
+      </form>`);
+    if (!locked) $("[data-form=client] [name=name]").focus();
+  }
+  function submitClientForm(form) {
+    const el = form.elements, v = (n) => el[n].value.trim(), err = $("#form-err");
+    $$(".input.invalid", form).forEach((i) => i.classList.remove("invalid"));
+    const bad = (n, msg) => { el[n].classList.add("invalid"); el[n].focus(); err.textContent = msg; };
+    const old = modal.name, name = el.name.disabled ? old : v("name");
+    if (!name) return bad("name", "Укажите название заказчика");
+    if (name !== old && customers().some((c) => c.name.toLowerCase() === name.toLowerCase())) return bad("name", "Такой заказчик уже есть");
+    let k = old && db.clients.find((x) => x.name === old);
+    if (!k) db.clients.push((k = { id: "C" + Date.now() }));
+    Object.assign(k, { name, phone: v("phone") || null, note: v("note") || null });
+    toast(old ? "Сохранено" : `Добавлен заказчик: ${name}`);
+    closeModal();
+    drawer = { type: "client", id: name };
+    rerender();
   }
 
   /* ================= Настройки ================= */
@@ -2001,7 +2125,6 @@
     if (!(await confirmBox(`<b>Восстановить из копии ${esc(file.name)}?</b><p class="muted" style="margin-bottom:0">Заявок: ${d.requests.length}, транспорта: ${d.vehicles.length}. Текущие данные${API ? " на сервере — у всех сотрудников —" : ""} заменятся этой копией.</p>`, "Восстановить", true))) return;
     db = d;
     drawer = null;
-    ui.fleet.month = fleetMonth();
     rerender();
     toast("Данные восстановлены из копии");
   }
@@ -2048,6 +2171,12 @@
           </div>
         </section>
       </div>
+      <section class="card" style="margin-top:16px">
+        <div class="card-h"><h2>Цвета графика</h2><span class="sub">у заявок, машин и дней</span><div class="spacer"></div>
+          <button class="btn sm" data-action="palette">${icon("sliders")}Настроить цвета</button></div>
+        <div class="card-b"><div class="hue-pick">${[...HUES, NOCAR].map((h) => `<span class="pal-dot vc ${hueCls(h)}" style="${hueStyle(h)}"></span>`).join("")}</div>
+          <p class="small muted" style="margin-bottom:0">Любой цвет можно заменить своим — он поменяется у всех заявок и машин с этим цветом.${db.settings.colors ? ` Изменено цветов: ${Object.keys(db.settings.colors).length}.` : ""}</p></div>
+      </section>
       <section class="card" style="margin-top:16px">
         <div class="card-h"><h2>Справочник сокращений</h2><span class="sub">как в графиках Excel</span></div>
         <div class="card-b">
@@ -2127,20 +2256,110 @@
   });
 
   /* ================= Печать ================= */
-  function printHtml(html) {
-    $("#print-area").innerHTML = html;
-    window.print();
+  function printHtml(html, cls = "") {
+    const area = $("#print-area");
+    area.className = cls;
+    area.innerHTML = html;
+    // размер листа — на время печати: программа — A4 книжный, остальное — как выбрано в окне печати
+    let page = $("#print-page");
+    if (!page) document.head.append((page = Object.assign(document.createElement("style"), { id: "print-page" })));
+    page.textContent = cls === "prog" ? "@page { size: A4 portrait; margin: 10mm 10mm 12mm; }" : "";
+    // печатаем, когда загрузятся логотип и шрифт программы (Calibri или похожий Carlito), но не дольше 2 секунд
+    const imgs = [...area.querySelectorAll("img")].filter((i) => !i.complete);
+    const ready = [...imgs.map((i) => new Promise((ok) => { i.onload = i.onerror = ok; })),
+      ...(cls === "prog" ? ["10pt Carlito", "bold 10pt Carlito"].map((f) => document.fonts.load(f).catch(() => {})) : [])];
+    Promise.race([Promise.all(ready), new Promise((ok) => setTimeout(ok, 2000))]).then(() => window.print());
+  }
+
+  /* Программа для печати — по образцу маршрутного листа из Excel (книга водителя «Asiastar»):
+     фирменная шапка, машина и водители, группа, даты, таблица «Дни | Дата | Город | Программа», подпись директора. */
+  const LETTERHEAD = {
+    name: "ООО «AZIM TRAVEL SERVICE»",
+    lines: ["159, X.A.Vali str., 140300 - Samarkand, Republic of Uzbekistan", "Ph.(office): +998 91 0710077;",
+      "Mobile: +998 936562212; +998 505722212", "WeChat,Whats up, Telegram : +998 933551117", "E-mail: azim.travel@gmail.com"],
+    director: "Азимова Ш.",
+  };
+  new Image().src = "img/logo.png"; // заранее, чтобы печать не ждала
+  const SVC_PHRASE = { "экя": "Экскурсия по городу" };
+  // «в Бухару», «через Нурату»: женский род на -а/-я — в винительный падеж
+  const toAcc = (city) => city.replace(/а$/, "у").replace(/я$/, "ю");
+  // строка «Программа» как в Excel: «Встреча в аэропорту в 07:40. Переезд в Хиву. Экскурсия по городу.»
+  // «Переезд» пишем, только если группа едет автобусом: в этот день нет проводов на поезд/самолёт и конечный город известен
+  function programText(x) {
+    if (!x) return "";
+    const ab = (x.route || "").split(/\s*-\s*/).filter(Boolean), from = ab[0], to = ab[ab.length - 1];
+    const key = (v) => (v.s || "").toLowerCase().trim();
+    const flies = (x.svc || []).some((v) => /^пр(\s|$)|поезд|самол/.test(key(v)));
+    const via = ab.slice(1, -1).filter((c) => CITY[c] && c !== from && c !== to).map((c) => toAcc(CITY[c]));
+    const move = ab.length > 1 && from !== to && CITY[to] && !flies ? ` в ${toAcc(CITY[to])}${via.length ? " через " + via.join(", ") : ""}` : "";
+    const phrases = [];
+    let moved = !move;
+    for (const v of x.svc || []) {
+      const k = key(v);
+      if (k === "выезд" && move) { phrases.push(`Выезд${move}${v.t ? " в " + v.t : ""}`); moved = true; continue; }
+      // переезд — после встречи группы, но до остальных услуг дня
+      if (!moved && !/^вс(\s|$)/.test(k)) { phrases.push("Переезд" + move); moved = true; }
+      phrases.push(v.s ? `${SVC_PHRASE[k] || svcInfo(v.s).label}${v.t ? " в " + v.t : ""}` : v.t || "");
+    }
+    if (!moved) phrases.push("Переезд" + move);
+    for (const e of x.extra || []) if (e.note) phrases.push(e.note);
+    return phrases.filter(Boolean).map((t) => t[0].toUpperCase() + t.slice(1).replace(/[.\s]+$/, "") + ".").join(" ");
+  }
+  // машины заявки: дни графика транспорта, которые по дате и маршруту совпадают только с этой заявкой (как в книге водителя);
+  // list — машины, первой та, у которой таких дней больше; byDate — день машины на каждую дату (с расходами из книги водителя)
+  function reqVehicles(r) {
+    const idx = reqIndex(), hits = new Map();
+    for (const v of db.vehicles) for (const x of v.schedule) {
+      const l = dayReqs(x, idx);
+      if (l.length === 1 && l[0] === r) (hits.get(v) || hits.set(v, []).get(v)).push(x);
+    }
+    const list = [...hits].sort((a, b) => b[1].length - a[1].length).map(([v]) => v), byDate = new Map();
+    for (const v of list) for (const x of hits.get(v)) if (!byDate.has(x.d)) byDate.set(x.d, x);
+    return { list, byDate };
   }
   function printProgram(r) {
-    const e = parseEscort(r.escort);
-    printHtml(`<h1>Программа обслуживания группы</h1>
-      <div>Azim Travel · заявка №${r.no} · сформировано ${fmtDateLong(TODAY)}</div>
-      <table><tr><td><b>Заказчик</b></td><td>${esc(r.customer)}</td><td><b>Группа</b></td><td>${esc(r.group || "—")} ${esc(r.country || "")}</td></tr>
-      <tr><td><b>Даты</b></td><td>${fmtDateLong(r.from)} — ${fmtDateLong(r.to)}</td><td><b>Туристов</b></td><td>${esc(paxOf(r)) || "—"}</td></tr>
-      <tr><td><b>Транспорт</b></td><td>${esc(r.transport || "—")}</td><td><b>Сопровождающий</b></td><td>${e ? esc(e.name) + (e.phone ? ", " + e.phone : "") : "—"}</td></tr></table>
-      <table><thead><tr><th>День</th><th>Дата</th><th>Маршрут</th><th>Услуги</th><th class="r">Стоимость, USD</th></tr></thead><tbody>
-      ${r.days.map((d) => `<tr><td>${d.n}</td><td>${d.d ? `${fmtDate(d.d)}, ${dow(d.d)}` : ""}</td><td>${esc(expandRoute(d.route) || "—")}</td><td>${esc(svcText(d.svc) || "—")}</td><td class="r">${d.cost ? fmtNum(d.cost) : "—"}</td></tr>`).join("")}
-      <tr><td colspan="4"><b>Итого</b></td><td class="r"><b>${fmtNum(r.total || 0)}</b></td></tr></tbody></table>`);
+    const e = parseEscort(r.escort), { list: vs, byDate } = reqVehicles(r), N = accNorm();
+    const span = Math.max(reqDays(r), ...r.days.map((d) => d.n || 0), 1);
+    const days = Array.from({ length: span }, (_, i) => {
+      const x = r.days.find((d) => d.n === i + 1);
+      return { n: i + 1, d: (x && x.d) || (r.from ? addDays(r.from, i) : ""), x };
+    });
+    const dShort = (s) => { if (!s) return ""; const d = parseISO(s); return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${String(d.getFullYear()).slice(2)}`; };
+    const city = (x) => (x && x.route ? x.route.split(/\s*-\s*/).map((c) => CITY[c] || c).join("-") : "");
+    // «Дано на расходы» — проживание и питание водителей за всю программу, сум: из книги водителя, а где там пусто — по норме
+    // из Настроек (питание — каждый день с маршрутом, проживание — когда ночёвка не в Самарканде, как «Заполнить по норме»)
+    const given = days.reduce((t, { d, x }) => {
+      const vx = byDate.get(d), route = (x && x.route) || (vx && vx.route) || "";
+      if (!route) return t;
+      const hotel = vx && vx.hotel != null ? +vx.hotel || 0 : nightAway(route) ? N.hotel : 0;
+      const food = vx && vx.food != null ? +vx.food || 0 : N.food;
+      return t + hotel + food;
+    }, 0);
+    const v0 = vs[0];
+    const group = [r.customer, r.group, r.country].filter(Boolean).join(", ") + (e ? `; гид ${e.name}${e.phone ? " " + e.phone : ""}` : "");
+    const title = document.title;
+    document.title = `Программа №${r.no} ${r.customer}`; // так назовётся PDF при сохранении
+    addEventListener("afterprint", () => { document.title = title; }, { once: true });
+    printHtml(`<header class="ml-head">
+        <img src="img/logo.png" alt="Azim Travel Service">
+        <div class="ml-firm"><b>${LETTERHEAD.name}</b>${LETTERHEAD.lines.map((l) => `<div>${esc(l)}</div>`).join("")}<hr></div>
+      </header>
+      <table class="ml-info">
+        <tr><th>МАРШРУТНЫЙ ЛИСТ №</th><td class="ml-no">${r.no}</td><td class="ml-given" colspan="2">Дано на расходы <b>${fmtNum(given)}</b> сум</td></tr>
+        <tr><th>Марка и номер автотранспорта:</th>
+          ${v0 ? (v0.partner ? `<td class="ml-box" colspan="2">${esc(vehTitle(v0))}</td>` : `<td class="ml-box">${esc(v0.brand)}</td><td class="ml-box">${esc(v0.plate || "")}</td>`) : `<td class="ml-box"></td><td class="ml-box"></td>`}
+          <td class="ml-more">${vs.slice(1).map((v) => esc(vehTitle(v))).join("; ")}</td></tr>
+        <tr><th>Водители:</th><td class="ml-line" colspan="2">${esc(vs.map((v) => v.driver).filter(Boolean).join(", "))}</td><td></td></tr>
+        <tr><th class="ml-n">Гр./Страна:</th><td class="ml-line" colspan="3">${esc(group)}</td></tr>
+        <tr><th>Количество туристов:</th><td class="ml-line">${esc(paxOf(r))}</td><td colspan="2"></td></tr>
+      </table>
+      <table class="ml-dates"><tr><th rowspan="2">Дата:</th><th>С</th><th>ПО</th></tr><tr><td>${dShort(r.from)}</td><td>${dShort(r.to)}</td></tr></table>
+      <table class="ml-days"><colgroup><col class="c1"><col class="c2"><col class="c3"><col></colgroup>
+        <thead><tr><th>Дни</th><th>Дата</th><th>Город</th><th>Программа</th></tr></thead>
+        <tbody>${days.map(({ n, d, x }) => `<tr><td class="b">${n}</td><td class="b">${dShort(d)}</td><td>${esc(city(x))}</td><td class="p">${esc(programText(x))}</td></tr>`).join("")}</tbody>
+      </table>
+      <table class="ml-sign"><tr><td></td><td>Директор</td><td></td><td></td></tr>
+        <tr><td></td><td>${LETTERHEAD.name}</td><td class="ml-sig"></td><td>${LETTERHEAD.director}</td></tr></table>`, "prog");
   }
   function printStatement(name) {
     const c = customers().find((x) => x.name === name);
@@ -2211,6 +2430,8 @@
     if (t.id === "global-search") return renderSearch();
     if (t.dataset.filter === "q") { ui.req.q = t.value; applyReqSearch(); return; }
     if (t.dataset.clients === "q") { ui.clients.q = t.value; applyClientSearch(); return; }
+    if (t.dataset.palette) return previewPalette(t);
+    if (t.closest("form[data-form=cell]")) updateCellTotal();
     if (t.closest("form[data-form=request]")) {
       if (t.name === "cost") updateFormTotal();
       if (t.name === "from" || t.name === "to") { syncFormDays(); renderFormDays(); }
@@ -2221,13 +2442,24 @@
     const t = e.target;
     if (t.dataset.filter && t.dataset.filter !== "q") { ui.req[t.dataset.filter] = t.value; render(); }
     if (t.dataset.cal === "customer") { ui.cal.customer = t.value; ui.cal.reanchor = true; render(); }
-    if (t.dataset.cal === "cancelled") { ui.cal.cancelled = t.checked; render(); }
-    if (t.dataset.fleet === "month") { ui.fleet.month = t.value; render(); }
     if (t.dataset.accf === "month") { ui.acc.month = t.value; render(); }
     if (t.dataset.accf === "vid") { ui.acc.vid = t.value; render(); }
     if (t.dataset.acc) accSet(t);
     if (t.dataset.import === "json" && t.files[0]) restoreBackup(t);
+    if (t.dataset.pick) pickColor(t);
+    if (t.dataset.palette) setPalette(t);
   });
+  // свой цвет из палитры браузера: у заявки или машины — сразу, в окне клетки — после «Сохранить»
+  function pickColor(t) {
+    const hex = parseHue(t.value);
+    if (t.dataset.pick === "req-hue") { reqById(t.dataset.id).hue = hex; return rerender(); }
+    if (t.dataset.pick === "veh-hue") { vehById(t.dataset.id).hue = hex; return rerender(); }
+    const f = t.closest("form"), lab = t.closest(".hue-custom");
+    f.elements.color.value = hex;
+    $$(".cell-colors button", f).forEach((b) => b.classList.remove("on"));
+    lab.classList.add("hex", "on");
+    lab.setAttribute("style", hueStyle(hex));
+  }
 
   document.addEventListener("submit", (e) => {
     const form = e.target;
@@ -2237,6 +2469,7 @@
     const f = form.elements;
     if (kind === "request") return submitRequestForm(form);
     if (kind === "vehicle") return submitVehicleForm(form);
+    if (kind === "client") return submitClientForm(form);
     if (kind === "cell") { saveCell(form); return closeModal(); }
     if (kind === "payment") {
       const r = reqById(form.dataset.id), amount = +f.amount.value;
@@ -2281,6 +2514,32 @@
       if (e.key === "Enter" && items[i]) { e.preventDefault(); openSearchResult(items[i].dataset.searchKind, items[i].dataset.searchId); }
       if (e.key === "Escape") { e.target.value = ""; renderSearch(); }
       return;
+    }
+    // Стрелки в таблицах по дням (программа в форме заявки, книга водителя) — как в Excel:
+    // ↓/↑ — та же колонка в строке ниже/выше; ←/→ — соседняя колонка той же строки, когда курсор у края текста,
+    // текст выделен целиком (как сразу после перехода) или поле пустое. В поле со списком подсказок ↓/↑ листают подсказки,
+    // пока введено начало, которого нет в списке.
+    if (/^Arrow(Down|Up|Left|Right)$/.test(e.key) && !e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      const t = e.target, grid = t.tagName === "INPUT" && /^(text|number|search|tel)$/.test(t.type)
+        ? (t.dataset.col ? "input[data-col]" : t.closest("#days-body") ? "input[name]" : "") : "";
+      if (grid) {
+        let next = null, go = true;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          if (t.list && t.value && ![...t.list.options].some((o) => o.value === t.value)) go = false;
+          const col = $$(t.dataset.col ? `[data-col="${t.dataset.col}"]` : `[name="${t.name}"]`, t.closest("table"));
+          next = col[col.indexOf(t) + (e.key === "ArrowDown" ? 1 : -1)];
+        } else {
+          const a = t.selectionStart, b = t.selectionEnd, len = t.value.length; // у числовых полей позиции курсора нет — переходим всегда
+          if (a != null) go = (a === 0 && b === len) || (a === b && (e.key === "ArrowLeft" ? a === 0 : a === len));
+          const row = $$(grid, t.closest("tr"));
+          next = row[row.indexOf(t) + (e.key === "ArrowRight" ? 1 : -1)];
+        }
+        if (go) {
+          e.preventDefault();
+          if (next) { next.focus(); try { next.select(); } catch (err) { /* ignore */ } }
+          return;
+        }
+      }
     }
     if (e.key === "Enter" && e.target.dataset && e.target.dataset.col) {
       e.preventDefault();
@@ -2334,7 +2593,14 @@
     if (!action) return;
 
     switch (action) {
-      case "toggle-nav": $("#app").classList.toggle("nav-open"); break;
+      case "toggle-nav": {
+        // на телефоне меню выезжает поверх страницы, на широком экране — прячется целиком и это запоминается
+        if (matchMedia("(max-width: 900px)").matches) { $("#app").classList.toggle("nav-open"); break; }
+        const closed = $("#app").classList.toggle("nav-closed");
+        try { localStorage.setItem(NAV_KEY, closed ? "closed" : "open"); } catch (err) { /* ignore */ }
+        navButton();
+        break;
+      }
       case "toggle-theme": {
         const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
         document.documentElement.dataset.theme = next;
@@ -2345,6 +2611,26 @@
       case "new-request": e.preventDefault(); openRequestForm(null, { customer: a.dataset.customer }); break;
       case "edit-request": openRequestForm(a.dataset.id); break;
       case "new-vehicle": openVehicleForm(null); break;
+      case "new-client": openClientForm(null); break;
+      case "palette": openPalette(); break;
+      case "palette-reset": {
+        const c = { ...db.settings.colors };
+        if (a.dataset.h) delete c[a.dataset.h]; else for (const k of Object.keys(c)) delete c[k];
+        if (Object.keys(c).length) db.settings.colors = c; else delete db.settings.colors;
+        rerender();
+        openPalette();
+        break;
+      }
+      case "edit-client": openClientForm(a.dataset.name); break;
+      case "del-client": {
+        const name = a.dataset.name;
+        if (!(await confirmBox(`<b>Удалить заказчика ${esc(name)}?</b><p class="muted" style="margin-bottom:0">У заказчика нет заявок, больше ничего не изменится.</p>`, "Удалить", true))) return;
+        db.clients = db.clients.filter((x) => x.name !== name);
+        drawer = null;
+        toast("Заказчик удалён");
+        rerender();
+        break;
+      }
       case "edit-vehicle": openVehicleForm(a.dataset.id); break;
       case "del-vehicle": {
         const v = vehById(a.dataset.id);
@@ -2364,6 +2650,7 @@
       case "cell-clear": {
         const f = $("form[data-form=cell]");
         for (const n of ["route", "svc", "cost", "color"]) f.elements[n].value = "";
+        $$(".extra-row", f).forEach((row) => row.remove());
         saveCell(f);
         closeModal();
         break;
@@ -2372,8 +2659,15 @@
         const f = a.closest("form");
         f.elements.color.value = a.dataset.c;
         $$(".cell-colors button", f).forEach((b) => b.classList.toggle("on", b === a));
+        $$(".cell-colors .hue-custom", f).forEach((l) => l.classList.remove("on"));
         break;
       }
+      case "cell-extra-add": {
+        $("#cell-extra").insertAdjacentHTML("beforeend", extraRow());
+        $("#cell-extra .extra-row:last-child [name=xusd]").focus();
+        break;
+      }
+      case "cell-extra-del": a.closest(".extra-row").remove(); updateCellTotal(); break;
       case "cell-open": {
         const { kind, id } = modal;
         closeModal();
@@ -2411,11 +2705,11 @@
         break;
       }
       case "veh-hue":
-        vehById(a.dataset.id).hue = +a.dataset.h;
+        vehById(a.dataset.id).hue = parseHue(a.dataset.h);
         rerender();
         break;
       case "req-hue":
-        reqById(a.dataset.id).hue = +a.dataset.h;
+        reqById(a.dataset.id).hue = parseHue(a.dataset.h);
         rerender();
         break;
       case "del-vpayment": {
@@ -2438,7 +2732,6 @@
       case "svc-day": ui.dash.svcDay = a.dataset.day; render(); break;
       case "rb-jump": ribbonScrollTo(a.dataset.key, `${a.dataset.ym}-01`, true); break;
       case "rb-today": ribbonScrollTo(a.dataset.key, ribbonTodayAnchor(a.dataset.key), true); break;
-      case "fleet-tab": ui.fleet.tab = a.dataset.v; render(); break;
       case "acc-open": {
         ui.acc.vid = a.dataset.id;
         if (drawer) closeDrawer();
@@ -2525,8 +2818,7 @@
         if (!(await confirmBox(`<b>Заменить всё данными из Excel?</b><p class="muted" style="margin-bottom:0">Все правки${API ? " на сервере — у всех сотрудников —" : ""} удалятся: заявки, оплаты, транспорт и учёт водителей вернутся к файлу ${esc(SEED.source)}. Перед этим стоит скачать резервную копию.</p>`, "Заменить", true))) return;
         db = fresh();
         drawer = null;
-        ui.fleet.month = fleetMonth();
-        rerender();
+            rerender();
         toast("Данные заменены данными из Excel");
         break;
       }
@@ -2549,7 +2841,14 @@
   });
 
   /* ================= Старт ================= */
+  function navButton() {
+    const b = $(".menu-btn"), open = !$("#app").classList.contains("nav-closed");
+    b.setAttribute("aria-expanded", open);
+    b.title = open ? "Скрыть меню" : "Показать меню";
+  }
+  try { if (localStorage.getItem(NAV_KEY) === "closed") $("#app").classList.add("nav-closed"); } catch (err) { /* ignore */ }
   $(".menu-btn").innerHTML = icon("menu");
+  navButton();
   $("#search-icon").innerHTML = icon("search");
   $("#theme-btn").innerHTML = icon(document.documentElement.dataset.theme === "dark" ? "sun" : "moon");
   window.addEventListener("hashchange", () => {
@@ -2579,7 +2878,6 @@
       setSync(e.auth ? "auth" : "error", e.message);
       return;
     }
-    ui.fleet.month = fleetMonth();
     setSync(!API ? "local" : sync.dirty ? "saving" : "ok");
     render();
     if (sync.dirty) push(); // пустой сервер получает первые данные

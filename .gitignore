@@ -6,6 +6,10 @@ dist/
 *.xls
 *.mp4
 Снимок экрана*
+*.png
+*.jpg
+*.jpeg
+!img/logo.png
 
 .DS_Store
 __pycache__/
