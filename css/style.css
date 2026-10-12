@@ -608,28 +608,24 @@ table.tl { border-collapse: separate; border-spacing: 0; font-family: var(--font
 .hue-pick button.on { outline: 2px solid var(--text); outline-offset: 2px; }
 .hue-pick button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .hue-pick button.nocar-btn { width: auto; padding: 0 11px; color: var(--nocar-on, #fff); font: inherit; font-size: 14px; font-weight: 600; }
-/* «Свой цвет»: невидимое поле type=color поверх кнопки открывает палитру браузера */
-.hue-custom {
-  position: relative; display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px 0 6px;
-  border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2);
+/* «Добавить цвет»: невидимое поле type=color поверх кнопки открывает палитру браузера */
+.hue-add {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 11px 0 8px;
+  border-radius: 6px; border: 1px dashed var(--border-strong); background: var(--surface); color: var(--text-2);
   font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap;
 }
-.hue-custom:hover { background: var(--surface-2); }
-.hue-custom i {
-  flex: none; width: 18px; height: 18px; border-radius: 4px;
-  background: conic-gradient(from 90deg, #e53935, #fdd835, #43a047, #00acc1, #1e88e5, #8e24aa, #e53935);
-}
-.hue-custom.on i { background: var(--c-solid); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .15); }
-.hue-custom.on { outline: 2px solid var(--text); outline-offset: 2px; }
-.hue-custom input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
-.hue-custom:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
+.hue-add:hover { background: var(--surface-2); color: var(--text); border-color: var(--primary); }
+.hue-add svg.i { width: 16px; height: 16px; }
+.hue-add input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.hue-add:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
 /* заголовок «Цвет в графике» с кнопкой «Настроить цвета» */
 .section-t.sect-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .sect-row .btn { font-family: var(--font); }
 /* «Цвета графика»: плитки с невидимым полем type=color поверх, «вернуть стандартный» — в углу изменённой */
 .pal-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .pal-item { position: relative; }
-.pal-item:last-child { grid-column: span 3; }
+.pal-item.wide { grid-column: span 3; }
+.pal-item .hue-add { width: 100%; height: 44px; border-radius: 8px; }
 .pal-sw { position: relative; display: flex; align-items: center; justify-content: center; height: 44px; border-radius: 8px; background: var(--c-solid); cursor: pointer; }
 .pal-sw:hover { filter: brightness(1.06); }
 .pal-sw:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }

@@ -425,9 +425,9 @@
   const vehOn = (v, d) => v.schedule.find((x) => x.d === d);
   const vehTitle = (v) => (v.partner ? v.driver || v.name : `${v.brand} ${v.plate || ""}`.trim());
   const vehSub = (v) => (v.partner ? "Частный перевозчик" : [v.driver, v.seats && `мест: ${v.seats}`, v.sold && "продан"].filter(Boolean).join(" · ") || "—");
-  /* Цвет заявки, машины или дня: оттенок OKLCH (число), "red" — нет авто, "#rrggbb" — свой цвет из палитры.
+  /* Цвет заявки, машины или дня: оттенок OKLCH (число), "red" — нет авто, "#rrggbb" — добавленный цвет.
      Каждый оттенок и «нет авто» можно перекрасить в «Цвета графика» (settings.colors: { оттенок: "#rrggbb" }) —
-     тогда меняется у всех заявок и машин с этим цветом.
+     тогда меняется у всех заявок и машин с этим цветом. Добавленные цвета хранятся в settings.addedColors: ["#rrggbb", …].
      hueCls/hueStyle дают класс и переменные для элемента .vc; --c-on — цвет текста на сплошной заливке своего цвета. */
   const NOCAR = "red"; // ярко-красный: машина ещё не назначена (в автоматическую раздачу цветов не входит)
   const isHex = (h) => typeof h === "string" && /^#[0-9a-f]{6}$/i.test(h);
@@ -459,18 +459,31 @@
   const vdot = (v) => `<span class="vdot vc ${v.partner ? "gray" : hueCls(v.hue)}" style="${hueStyle(v.hue)}"></span>`;
   const rdot = (r) => `<span class="vdot vc ${r.cancelled ? "gray" : hueCls(r.hue)}" style="${hueStyle(r.hue)}"></span>`;
   const nocarBtn = (attrs, on) => `<button type="button" class="vc nocar nocar-btn ${on ? "on" : ""}" ${attrs} title="Машина ещё не назначена">Нет авто</button>`;
-  // «Свой цвет»: открывает палитру браузера (квадрат оттенков, полоса цвета, ввод HEX, пипетка)
-  const customPick = (attrs, cur) => `<label class="hue-custom vc ${isHex(cur) ? "hex on" : ""}" ${isHex(cur) ? `style="${hueStyle(cur)}"` : ""} title="Выбрать любой цвет">
-    <i></i>Свой цвет<input type="color" value="${isHex(cur) ? cur : "#3b5295"}" ${attrs} aria-label="Свой цвет"></label>`;
-  const huePick = (action, id, cur, nocar) => `<div class="hue-pick">${(HUES.includes(cur) || cur === NOCAR || isHex(cur) ? HUES : [cur, ...HUES]).map((h) =>
+  // «Добавить цвет»: открывает палитру браузера (квадрат оттенков, полоса цвета, ввод HEX, пипетка),
+  // выбранный цвет сохраняется в набор и дальше стоит в выборе у всех заявок, машин и дней
+  const addColorBtn = (attrs) => `<label class="hue-add" title="Добавить свой цвет в набор">${icon("plus")}Добавить цвет<input type="color" value="#3b5295" ${attrs} aria-label="Добавить цвет"></label>`;
+  const addedColors = () => db.settings.addedColors || [];
+  function addColor(hex) {
+    if (!addedColors().includes(hex)) db.settings.addedColors = [...addedColors(), hex];
+  }
+  // цвета в выборе: стандартные, добавленные и текущий, если его нет в наборе (например, добавленный цвет убрали из набора)
+  function pickList(cur) {
+    const list = [...HUES, ...addedColors()];
+    return cur == null || cur === NOCAR || cur === "gray" || list.includes(cur) ? list : [...list, cur];
+  }
+  const huePick = (action, id, cur, nocar) => `<div class="hue-pick">${pickList(cur).map((h) =>
     `<button class="vc ${hueCls(h)} ${h === cur ? "on" : ""}" style="${hueStyle(h)}" data-action="${action}" data-id="${id}" data-h="${h}" aria-label="Выбрать этот цвет"></button>`).join("")}${
     nocar ? nocarBtn(`data-action="${action}" data-id="${id}" data-h="${NOCAR}"`, cur === NOCAR) : ""}${
-    customPick(`data-pick="${action}" data-id="${id}"`, cur)}</div>`;
+    addColorBtn(`data-pick="${action}" data-id="${id}"`)}</div>`;
+  // образец цвета в окне клетки дня
+  const cellSw = (c, on, label = "Выбрать этот цвет") => `<button type="button" class="vc ${c === "gray" ? "gray" : hueCls(c)} ${on ? "on" : ""}" ${c === "gray" ? "" : `style="${hueStyle(c)}"`}
+    data-action="cell-color" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
   // в выборе — 18 оттенков: 9 основных (их раздаём автоматически) и 9 промежуточных
   const HUES = [...PALETTE, 48, 100, 125, 165, 202, 238, 272, 308, 345].sort((a, b) => a - b);
   const colorTitle = () => `<div class="section-t sect-row"><span>Цвет в графике</span><button class="btn sm ghost" type="button" data-action="palette">${icon("sliders")}Настроить цвета</button></div>`;
 
-  // «Цвета графика»: свой цвет для каждого из 18 оттенков и для «Нет авто» — сразу у всех заявок и машин с этим цветом
+  // «Цвета графика»: свой цвет для каждого из 18 оттенков и для «Нет авто» — сразу у всех заявок и машин с этим цветом;
+  // добавленные цвета здесь же перекрашиваются (тоже у всех сразу) и убираются из набора
   function openPalette() {
     const colors = db.settings.colors || {}, list = [...HUES, NOCAR];
     modal = { type: "palette" };
@@ -479,11 +492,18 @@
         <button class="btn icon sm ghost" type="button" data-action="close-modal" aria-label="Закрыть">${icon("x")}</button></div>
       <div class="modal-b">
         <p class="small muted" style="margin:0 0 14px">Нажмите на цвет и выберите свой: он сразу поменяется у всех заявок и машин с этим цветом.</p>
-        <div class="pal-grid">${list.map((h) => `<div class="pal-item">
-          <label class="pal-sw vc ${hueCls(h)} ${h === NOCAR ? "wide" : ""}" style="${hueStyle(h)}" title="${h === NOCAR ? "Цвет «Нет авто»" : "Изменить цвет"}">${h === NOCAR ? "<span>Нет авто</span>" : ""}
+        <div class="pal-grid">${list.map((h) => `<div class="pal-item ${h === NOCAR ? "wide" : ""}">
+          <label class="pal-sw vc ${hueCls(h)}" style="${hueStyle(h)}" title="${h === NOCAR ? "Цвет «Нет авто»" : "Изменить цвет"}">${h === NOCAR ? "<span>Нет авто</span>" : ""}
             <input type="color" value="${colors[h] || baseHex(h)}" data-palette="${h}" aria-label="${h === NOCAR ? "Цвет «Нет авто»" : "Изменить цвет"}"></label>
           ${colors[h] ? `<button type="button" class="pal-reset" data-action="palette-reset" data-h="${h}" title="Вернуть стандартный цвет" aria-label="Вернуть стандартный цвет">${icon("restore")}</button>` : ""}
         </div>`).join("")}</div>
+        <div class="section-t" style="margin-top:18px">Добавленные цвета</div>
+        <div class="pal-grid">${addedColors().map((h) => `<div class="pal-item">
+          <label class="pal-sw vc hex" style="${hueStyle(h)}" title="Изменить цвет">
+            <input type="color" value="${h}" data-added="${h}" aria-label="Изменить цвет"></label>
+          <button type="button" class="pal-reset" data-action="color-del" data-h="${h}" title="Убрать из набора" aria-label="Убрать из набора">${icon("x")}</button>
+        </div>`).join("")}<div class="pal-item wide">${addColorBtn(`data-pick="palette-add"`)}</div></div>
+        ${addedColors().length ? `<p class="small muted" style="margin:10px 0 0">Если убрать цвет из набора, у заявок и машин с ним он останется.</p>` : ""}
       </div>
       <div class="modal-f">
         ${Object.keys(colors).length ? `<button class="btn ghost" type="button" data-action="palette-reset" data-h="" style="margin-right:auto">${icon("restore")}Вернуть стандартные цвета</button>` : ""}
@@ -498,9 +518,19 @@
     else { lab.classList.add("hex"); lab.setAttribute("style", `--vh:0;--vx:${t.value};--c-on:${onColor(t.value)}`); }
   }
   function setPalette(t) {
-    db.settings.colors = { ...db.settings.colors, [t.dataset.palette]: t.value.toLowerCase() };
+    if (t.dataset.added) recolorAdded(t.dataset.added, parseHue(t.value));
+    else db.settings.colors = { ...db.settings.colors, [t.dataset.palette]: t.value.toLowerCase() };
     rerender();
     openPalette();
+  }
+  // добавленный цвет перекрасили — меняем его у всех заявок, машин и дней с этим цветом
+  function recolorAdded(from, to) {
+    if (from === to) return;
+    db.settings.addedColors = [...new Set(addedColors().map((h) => (h === from ? to : h)))];
+    for (const x of [...db.requests, ...db.vehicles]) {
+      if (x.hue === from) x.hue = to;
+      for (const d of x.days || x.schedule) if (d.color === from) d.color = to;
+    }
   }
   // свой цвет клетки дня (оттенок, "gray", "red" — нет авто, или #rrggbb), рисуется поверх цвета строки
   const tint = (x) => (x && x.color != null
@@ -1192,8 +1222,6 @@
     // день заявки листается только в её датах, у машины — без ограничений
     const lo = kind === "req" ? x.from : null, hi = kind === "req" ? x.to || x.from : null;
     const step = (n, label, ic, off) => `<button class="btn icon sm ghost" type="button" data-action="cell-step" data-step="${n}" aria-label="${label}" title="${label}" ${off ? "disabled" : ""}>${icon(ic)}</button>`;
-    const sw = (c, label) => `<button type="button" class="vc ${c === "gray" ? "gray" : hueCls(c)} ${day.color === c ? "on" : ""}" ${c === "gray" ? "" : `style="${hueStyle(c)}"`}
-      data-action="cell-color" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
     modal = { type: "cell", kind, id, d };
     showModal(`
       <form class="modal sm" data-form="cell" novalidate style="width:min(540px,100%)">
@@ -1221,7 +1249,7 @@
             <div class="field span4"><label>Цвет клетки</label>
               <div class="hue-pick cell-colors">
                 <button type="button" class="auto vc ${kind === "veh" && x.partner ? "gray" : hueCls(x.hue)} ${day.color == null ? "on" : ""}" style="${hueStyle(x.hue)}" data-action="cell-color" data-c=""><span class="vdot"></span>${kind === "req" ? "Как у заявки" : "Как у машины"}</button>
-                ${HUES.map((h) => sw(h, "Свой цвет")).join("")}${sw("gray", "Серый")}${kind === "req" ? nocarBtn(`data-action="cell-color" data-c="${NOCAR}"`, day.color === NOCAR) : ""}${customPick(`data-pick="cell-color"`, day.color)}
+                ${pickList(day.color).map((h) => cellSw(h, day.color === h)).join("")}${cellSw("gray", day.color === "gray", "Серый")}${nocarBtn(`data-action="cell-color" data-c="${NOCAR}"`, day.color === NOCAR)}${addColorBtn(`data-pick="cell-color"`)}
               </div>
               <input type="hidden" name="color" value="${day.color ?? ""}">
             </div>
@@ -1505,7 +1533,7 @@
   function fleetChart(list, rg) {
     const rows = list.filter((v) => !v.sold || v.schedule.length);
     return `<div class="card"><div class="card-h wrap"><h2>График транспорта · ${rangeTitle(rg).toLowerCase()}</h2><div class="spacer"></div>
-      <div class="legend"><span>У каждой машины свой цвет, частные — серые</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить рейс или цвет, на пустую — добавить рейс</span></div></div>
+      <div class="legend"><span>У каждой машины свой цвет, частные — серые</span><span><i class="vc gray" style="background:var(--c-solid)"></i>Переезд между городами</span><span><i class="vc gray" style="background:var(--c-soft);border:1px solid var(--border-strong)"></i>Работа в городе</span><span><i class="vc nocar" style="background:var(--c-solid)"></i>Нет авто</span><span class="hint">${icon("edit")}Нажмите на клетку, чтобы изменить рейс или цвет, на пустую — добавить рейс</span></div></div>
       <div class="tl-wrap" data-keep-scroll="fleet"><table class="tl tl-period" style="--days:${rg.dates.length}">${ribbonHead(rg, "Транспорт")}
       <tbody>${rows.map((v) => {
         const by = new Map(v.schedule.map((x) => [x.d, x]));
@@ -1919,7 +1947,7 @@
           ${info("Дней в работе", v.schedule.length)}
           ${info("Средняя ставка в день", v.schedule.length ? fmtUsd(cost / v.schedule.length) : "—")}
         </div>
-        ${v.partner ? "" : `${colorTitle()}${huePick("veh-hue", v.id, v.hue)}`}
+        ${v.partner ? "" : `${colorTitle()}${huePick("veh-hue", v.id, v.hue, true)}`}
         <div class="section-t">Взаиморасчёты с перевозчиком</div>
         <div class="money">
           <div><div class="k">Начислено</div><div class="v num">${fmtUsd(cost)}</div></div>
@@ -2174,8 +2202,8 @@
       <section class="card" style="margin-top:16px">
         <div class="card-h"><h2>Цвета графика</h2><span class="sub">у заявок, машин и дней</span><div class="spacer"></div>
           <button class="btn sm" data-action="palette">${icon("sliders")}Настроить цвета</button></div>
-        <div class="card-b"><div class="hue-pick">${[...HUES, NOCAR].map((h) => `<span class="pal-dot vc ${hueCls(h)}" style="${hueStyle(h)}"></span>`).join("")}</div>
-          <p class="small muted" style="margin-bottom:0">Любой цвет можно заменить своим — он поменяется у всех заявок и машин с этим цветом.${db.settings.colors ? ` Изменено цветов: ${Object.keys(db.settings.colors).length}.` : ""}</p></div>
+        <div class="card-b"><div class="hue-pick">${[...HUES, ...addedColors(), NOCAR].map((h) => `<span class="pal-dot vc ${hueCls(h)}" style="${hueStyle(h)}"></span>`).join("")}</div>
+          <p class="small muted" style="margin-bottom:0">Любой цвет можно заменить своим — он поменяется у всех заявок и машин с этим цветом. Свои цвета добавляются кнопкой «Добавить цвет».${db.settings.colors ? ` Изменено цветов: ${Object.keys(db.settings.colors).length}.` : ""}${addedColors().length ? ` Добавлено цветов: ${addedColors().length}.` : ""}</p></div>
       </section>
       <section class="card" style="margin-top:16px">
         <div class="card-h"><h2>Справочник сокращений</h2><span class="sub">как в графиках Excel</span></div>
@@ -2430,7 +2458,7 @@
     if (t.id === "global-search") return renderSearch();
     if (t.dataset.filter === "q") { ui.req.q = t.value; applyReqSearch(); return; }
     if (t.dataset.clients === "q") { ui.clients.q = t.value; applyClientSearch(); return; }
-    if (t.dataset.palette) return previewPalette(t);
+    if (t.dataset.palette || t.dataset.added) return previewPalette(t);
     if (t.closest("form[data-form=cell]")) updateCellTotal();
     if (t.closest("form[data-form=request]")) {
       if (t.name === "cost") updateFormTotal();
@@ -2447,18 +2475,22 @@
     if (t.dataset.acc) accSet(t);
     if (t.dataset.import === "json" && t.files[0]) restoreBackup(t);
     if (t.dataset.pick) pickColor(t);
-    if (t.dataset.palette) setPalette(t);
+    if (t.dataset.palette || t.dataset.added) setPalette(t);
   });
-  // свой цвет из палитры браузера: у заявки или машины — сразу, в окне клетки — после «Сохранить»
+  // «Добавить цвет»: цвет сразу сохраняется в набор; у заявки или машины ставится сразу, в окне клетки — после «Сохранить»
   function pickColor(t) {
     const hex = parseHue(t.value);
+    addColor(hex);
     if (t.dataset.pick === "req-hue") { reqById(t.dataset.id).hue = hex; return rerender(); }
     if (t.dataset.pick === "veh-hue") { vehById(t.dataset.id).hue = hex; return rerender(); }
-    const f = t.closest("form"), lab = t.closest(".hue-custom");
+    if (t.dataset.pick === "palette-add") { rerender(); return openPalette(); }
+    const f = t.closest("form");
     f.elements.color.value = hex;
     $$(".cell-colors button", f).forEach((b) => b.classList.remove("on"));
-    lab.classList.add("hex", "on");
-    lab.setAttribute("style", hueStyle(hex));
+    const b = $$(".cell-colors [data-c]", f).find((x) => x.dataset.c === hex);
+    if (b) b.classList.add("on");
+    else $(".cell-colors [data-c=gray]", f).insertAdjacentHTML("beforebegin", cellSw(hex, true));
+    save();
   }
 
   document.addEventListener("submit", (e) => {
@@ -2621,6 +2653,13 @@
         openPalette();
         break;
       }
+      case "color-del": {
+        const list = addedColors().filter((h) => h !== a.dataset.h);
+        if (list.length) db.settings.addedColors = list; else delete db.settings.addedColors;
+        rerender();
+        openPalette();
+        break;
+      }
       case "edit-client": openClientForm(a.dataset.name); break;
       case "del-client": {
         const name = a.dataset.name;
@@ -2659,7 +2698,6 @@
         const f = a.closest("form");
         f.elements.color.value = a.dataset.c;
         $$(".cell-colors button", f).forEach((b) => b.classList.toggle("on", b === a));
-        $$(".cell-colors .hue-custom", f).forEach((l) => l.classList.remove("on"));
         break;
       }
       case "cell-extra-add": {
