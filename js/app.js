@@ -1667,13 +1667,6 @@
   }
   const accMonthSel = (m) => `<select class="input" data-accf="month" aria-label="Период"><option value="">Весь период</option>${monthOptions(m)}</select>`;
   const periodLabel = (m) => (m ? monthLabel(m).toLowerCase() : "весь период");
-  const accKpis = (c) => `<div class="grid kpis">
-    ${kpi("Приход", money(c.income), `${c.sheets.length} ${plural(c.sheets.length, "маршрутный лист", "маршрутных листа", "маршрутных листов")} · ${c.days} дн.`)}
-    ${kpi("Расходы на маршрут", money(c.drv + c.car + c.kom), "питание, жильё, машина, командировочные")}
-    ${kpi("Топливо и запчасти", money(c.fuel + c.parts), `топливо ${fmtUsd(c.fuel)} · запчасти ${fmtUsd(c.parts)}`)}
-    ${kpi("Чистая прибыль", money(c.profit), c.income ? `${Math.round((c.profit / c.income) * 100)}% от прихода, после НДФЛ` : "после НДФЛ, топлива и запчастей")}
-    ${kpi(c.komLeft < -0.5 ? "Командировочные: выдано больше" : "Командировочные к выплате", money(Math.abs(c.komLeft)), `начислено ${fmtUsd(c.kom)} · выдано ${fmtUsd(c.card + c.komPaid)}`)}
-  </div>`;
 
   function accSummary(m) {
     const g = ui.acc.group;
@@ -1687,8 +1680,7 @@
     };
     const cells = (c) => `${usdTd(c.income)}${usdTd(c.drv)}${usdTd(c.car)}${usdTd(c.kom)}${usdTd(c.ndfl)}${usdTd(c.fuel)}${usdTd(c.parts)}
       ${usdTd(c.profit, c.profit < -0.5 ? "strong neg" : "strong")}${usdTd(c.komLeft)}`;
-    return `${accKpis(total)}
-      <div class="toolbar">
+    return `<div class="toolbar">
         <div class="seg">${groups.map(([v, l]) => `<button class="${g === v ? "on" : ""}" data-action="acc-group" data-v="${v}">${l}</button>`).join("")}</div>
         <div class="grow"></div>${accMonthSel(m)}</div>
       <div class="card"><div class="card-h wrap"><h2>Итоговый отчёт по водителям</h2><span class="sub">${periodLabel(m)} · USD</span><div class="spacer"></div>
@@ -1708,8 +1700,7 @@
     const c = accCalc(v, m), tab = ui.acc.tab;
     const tabs = [["sheets", "Маршрутные листы"], ["report", "Итоговый отчёт"], ["fuel", "Топливо"], ["parts", "Запчасти"], ["pay", "Зарплата и ком."], ["total", "Отчёт · прибыль"]];
     const body = { sheets: accSheetsTab, report: accReportTab, fuel: accFuelTab, parts: accPartsTab, pay: accPayTab, total: accTotalTab }[tab](v, m, c);
-    return `${accKpis(c)}
-      <div class="toolbar">
+    return `<div class="toolbar">
         <button class="btn" data-action="acc-back">${icon("chevronLeft")}Все водители</button>
         <select class="input" data-accf="vid" aria-label="Водитель">${accVehicles().map((x) => `<option value="${x.id}" ${x === v ? "selected" : ""}>${esc(vehTitle(x))}${x.driver ? " · " + esc(x.driver) : ""}${x.sold ? " (продан)" : ""}</option>`).join("")}</select>
         <div class="grow"></div>${accMonthSel(m)}</div>
@@ -2867,6 +2858,38 @@
   document.addEventListener("scroll", (e) => {
     if (e.target instanceof Element && ribbons[e.target.dataset.keepScroll]) updateRibbonMonth(e.target.dataset.keepScroll);
   }, true);
+
+  // правой кнопкой мыши таблицу или график можно тащить влево-вправо и вверх-вниз;
+  // двигается ближайшая прокручиваемая область (по вертикали — или сама страница), меню браузера здесь не открывается;
+  // в полях вне таблиц (поиск, фильтры, настройки) правая кнопка работает как обычно
+  const scrollsX = (el) => el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(el).overflowX);
+  const scrollsY = (el) => el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(el).overflowY);
+  const panOff = (t) => !(t instanceof Element) || !t.closest("#view")
+    || (t.closest("input, textarea, select, [contenteditable]") && !t.closest(".table-wrap, .sheet-wrap, .tl-wrap"));
+  let pan = null;
+  function endPan() { pan = null; document.body.classList.remove("panning"); }
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 2 || panOff(e.target)) return;
+    let x = null, y = null;
+    for (let el = e.target; el && el !== document.body; el = el.parentElement) {
+      if (!x && scrollsX(el)) x = el;
+      if (!y && scrollsY(el)) y = el;
+    }
+    pan = { x: x || document.scrollingElement, y: y || document.scrollingElement, cx: e.clientX, cy: e.clientY };
+    document.body.classList.add("panning");
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!pan) return;
+    if (!(e.buttons & 2)) return endPan();
+    pan.x.scrollLeft -= e.clientX - pan.cx;
+    pan.y.scrollTop -= e.clientY - pan.cy;
+    pan.cx = e.clientX;
+    pan.cy = e.clientY;
+  });
+  document.addEventListener("mouseup", (e) => { if (pan && e.button === 2) endPan(); });
+  window.addEventListener("blur", () => { if (pan) endPan(); });
+  document.addEventListener("contextmenu", (e) => { if (!panOff(e.target)) e.preventDefault(); });
 
   // сортировка таблицы заявок
   document.addEventListener("click", (e) => {
