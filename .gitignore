@@ -1,5 +1,7 @@
 # сборка для сервера: python3 tools/build.py
 dist/
+# кадры и звук при записи видеоурока: node tools/video/record.mjs
+tools/video/work/
 
 # файлы с данными клиентов и большие файлы — не для репозитория
 *.xlsx
