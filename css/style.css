@@ -643,6 +643,9 @@ table.tl { border-collapse: separate; border-spacing: 0; font-family: var(--font
   border: 1px solid var(--border); color: var(--text-2); font: inherit; font-size: 14px; font-weight: 500;
 }
 
+/* перетаскивание правой кнопкой мыши */
+body.panning, body.panning * { cursor: grabbing !important; user-select: none; }
+
 /* ---------- Drawer & modal ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(12, 17, 33, .45); z-index: 50; animation: fade .15s ease; }
 .drawer {
