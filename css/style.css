@@ -338,6 +338,10 @@ table.sheet { border-collapse: separate; border-spacing: 0; font-family: var(--f
 .sheet .sv.border::before { background: var(--rose); }
 .sheet .sv.unk::before { background: var(--danger); }
 .sheet .sv .tm { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.sheet .sv.vc { margin: 0 -8px; padding: 1px 8px; background: var(--c-solid); color: var(--c-on, var(--vs-ink)); }
+.sheet .sv.vc .tm { color: inherit; }
+.sheet .sv.vc::before { background: currentColor; }
+.sheet .sv.vc.nocar { color: var(--nocar-on, #fff); }
 .sheet .sv.nt { white-space: normal; font-style: italic; color: var(--muted); overflow-wrap: anywhere; }
 .sheet .sv.nt::before { display: none; }
 .sheet .dm { margin-top: auto; padding-top: 4px; font-weight: 700; font-size: 14.5px; color: var(--text); font-variant-numeric: tabular-nums; }
@@ -442,6 +446,8 @@ select.ai { min-width: 160px; cursor: pointer; }
 }
 .chip svg.i { width: 13px; height: 13px; }
 .chip .tm { font-variant-numeric: tabular-nums; font-weight: 700; }
+/* свой цвет услуги — квадратик перед меткой */
+.chip .sdot { flex: none; width: 9px; height: 9px; border-radius: 2px; background: var(--c-solid); }
 .chip.air { background: var(--info-soft); color: var(--info); }
 .chip.rail { background: var(--violet-soft); color: var(--violet); }
 .chip.exc { background: var(--firuza-soft); color: var(--firuza); }
@@ -570,6 +576,9 @@ table.tl { border-collapse: separate; border-spacing: 0; font-family: var(--font
 .tl-period .cellbar .sl { font-size: 12px; font-weight: 500; max-width: 100%; overflow: hidden; text-overflow: ellipsis; opacity: .92; }
 .tl-period .cellbar .sl i { font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; margin-right: 3px; }
 .tl-period .cellbar .sl.nt { font-style: italic; }
+/* услуга со своим цветом (например, цвет машины, которая её выполняет) — полоса во всю ширину клетки, как заливка строки в Excel */
+.tl-period .cellbar .sl.vc { align-self: stretch; max-width: none; margin: 0 -6px; padding: 1px 6px; background: var(--c-solid); color: var(--c-on, var(--vs-ink)); opacity: 1; }
+.tl .cellbar .sl.vc.nocar { color: var(--nocar-on, #fff); }
 .tl-period .cellbar .pr { margin-top: auto; padding-top: 3px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: .92; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13.5px; color: var(--muted); align-items: center; }
 .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
@@ -709,6 +718,14 @@ body.panning, body.panning * { cursor: grabbing !important; user-select: none; }
 .days-edit .input { height: 34px; }
 .days-edit .cost-in { width: 96px; text-align: right; font-variant-numeric: tabular-nums; }
 .days-edit .xhint { width: 96px; font-size: 12.5px; color: var(--muted); text-align: right; margin-top: 2px; cursor: help; white-space: nowrap; }
+/* услуги в окне дня: строка — цвет услуги, текст, удалить; под строкой раскрывается выбор цвета */
+.svc-list { display: grid; gap: 6px; margin-bottom: 6px; }
+.svc-row { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.svc-c { width: 34px; height: 34px; border: 0; border-radius: 6px; padding: 0; cursor: pointer; background: var(--c-solid); }
+.svc-c.auto { background: var(--surface-2); border: 1px dashed var(--border-strong); }
+.svc-c:hover { filter: brightness(.95); box-shadow: 0 0 0 2px var(--border-strong); }
+.svc-c:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.svc-pal { grid-column: 1 / -1; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
 .extra-list { display: grid; gap: 6px; }
 .extra-list:empty { display: none; }
 .extra-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 6px; align-items: center; }

@@ -133,9 +133,11 @@
     const ic = { air: "plane", rail: "train", border: "flag", exc: "landmark", food: "utensils" }[kind] || "pin";
     return { label: name, kind, icon: ic };
   }
+  // свой цвет услуги (s.c) — например, цвет машины, которая её выполняет: строка услуги закрашивается им, как в Excel
+  const svcTint = (s) => tint(s.c != null ? { color: s.c } : null);
   function svcChip(s) {
-    const info = svcInfo(s.s);
-    return `<span class="chip ${info.kind}" title="${esc(info.label)}">${icon(info.icon)}${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${s.s ? esc(s.s) : ""}</span>`;
+    const info = svcInfo(s.s), tn = svcTint(s);
+    return `<span class="chip ${info.kind}" title="${esc(info.label)}">${s.c != null ? `<i class="sdot ${tn.cls}" ${tn.style}></i>` : ""}${icon(info.icon)}${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${s.s ? esc(s.s) : ""}</span>`;
   }
   const svcChips = (list) => (list && list.length ? `<div class="chips">${list.map(svcChip).join("")}</div>` : "");
   const svcText = (list) => (list || []).map((s) => [s.t, s.s ? svcInfo(s.s).label : null].filter(Boolean).join(" ")).join(", ");
@@ -193,6 +195,17 @@
     d.settings = { ...DEFAULT_SETTINGS, ...d.settings };
     for (const r of d.requests) { r.days = r.days || []; r.payments = r.payments || []; r.log = r.log || []; }
     for (const v of d.vehicles) { v.schedule = v.schedule || []; v.payments = v.payments || []; v.log = v.log || []; }
+    // день, разделённый на утро и вечер (day.pm, было в промежуточной сборке), — снова один день: маршруты подряд,
+    // услуги вечера — после утренних и с цветом вечера; day.cost уже был итогом за весь день
+    for (const x of [...d.requests.flatMap((r) => r.days), ...d.vehicles.flatMap((v) => v.schedule)]) {
+      const pm = x.pm;
+      if (!pm) continue;
+      delete x.pm;
+      const cities = [x.route, pm.route].filter(Boolean).flatMap((r) => r.split(/\s*-\s*/));
+      x.route = cities.filter((c, i) => c !== cities[i - 1]).join("-") || null;
+      x.svc = [...(x.svc || []), ...(pm.svc || []).map((y) => (pm.color != null ? { ...y, c: pm.color } : y))];
+      if (pm.extra) x.extra = [...(x.extra || []), ...pm.extra];
+    }
     // заказчики, добавленные вручную: [{ id, name, phone, note }]; остальные заказчики берутся из заявок
     if (!Array.isArray(d.clients)) d.clients = [];
     if (d.hueV !== HUE_VERSION) assignHues(d);
@@ -476,8 +489,8 @@
     nocar ? nocarBtn(`data-action="${action}" data-id="${id}" data-h="${NOCAR}"`, cur === NOCAR) : ""}${
     addColorBtn(`data-pick="${action}" data-id="${id}"`)}</div>`;
   // образец цвета в окне клетки дня
-  const cellSw = (c, on, label = "Выбрать этот цвет") => `<button type="button" class="vc ${c === "gray" ? "gray" : hueCls(c)} ${on ? "on" : ""}" ${c === "gray" ? "" : `style="${hueStyle(c)}"`}
-    data-action="cell-color" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
+  const cellSw = (c, on, label = "Выбрать этот цвет", action = "cell-color") => `<button type="button" class="vc ${c === "gray" ? "gray" : hueCls(c)} ${on ? "on" : ""}" ${c === "gray" ? "" : `style="${hueStyle(c)}"`}
+    data-action="${action}" data-c="${c}" aria-label="${label}" title="${label}"></button>`;
   // в выборе — 18 оттенков: 9 основных (их раздаём автоматически) и 9 промежуточных
   const HUES = [...PALETTE, 48, 100, 125, 165, 202, 238, 272, 308, 345].sort((a, b) => a - b);
   const colorTitle = () => `<div class="section-t sect-row"><span>Цвет в графике</span><button class="btn sm ghost" type="button" data-action="palette">${icon("sliders")}Настроить цвета</button></div>`;
@@ -529,7 +542,10 @@
     db.settings.addedColors = [...new Set(addedColors().map((h) => (h === from ? to : h)))];
     for (const x of [...db.requests, ...db.vehicles]) {
       if (x.hue === from) x.hue = to;
-      for (const d of x.days || x.schedule) if (d.color === from) d.color = to;
+      for (const d of x.days || x.schedule) {
+        if (d.color === from) d.color = to;
+        for (const s of d.svc || []) if (s.c === from) s.c = to;
+      }
     }
   }
   // свой цвет клетки дня (оттенок, "gray", "red" — нет авто, или #rrggbb), рисуется поверх цвета строки
@@ -943,7 +959,7 @@
       return `<td class="dc ${r.cancelled ? "" : "ed"} ${tn.cls} ${date === TODAY ? "today" : ""}" ${tn.style} data-day="${date}" title="${esc(tip)}"><div class="in">
         <div class="dd">${fmtDate(date)}, ${date === TODAY ? "сегодня" : dow(date)}</div>
         ${x && x.route ? `<div class="dr">${esc(x.route)}</div>` : ""}
-        ${x ? x.svc.map((s) => `<div class="sv ${s.s ? svcInfo(s.s).kind : ""}">${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${esc(s.s || "")}</div>`).join("") : ""}
+        ${x ? x.svc.map((s) => { const tn = svcTint(s); return `<div class="sv ${s.s ? svcInfo(s.s).kind : ""} ${tn.cls}" ${tn.style}>${s.t ? `<span class="tm">${esc(s.t)}</span>` : ""}${esc(s.s || "")}</div>`; }).join("") : ""}
         ${x ? (x.extra || []).map((e) => `<div class="sv nt">${esc(extraLabel(e))}</div>`).join("") : ""}
         ${x && x.cost ? `<div class="dm">${fmtUsd(x.cost)}</div>` : ""}
       </div></td>`;
@@ -1079,7 +1095,8 @@
       from: addDays(TODAY, 7), to: addDays(TODAY, 13), rate: db.settings.rate, vat: db.settings.vat, days: [],
     };
     // в поле — цена без доп. цен; доп. цены с комментариями меняются в клетке графика и сохраняются как есть
-    modal = { type: "request-form", id, days: daySlots(src).map((d) => ({ route: d.route || "", svc: svcToText(d.svc), cost: baseCost(d) || "", color: d.color, extra: d.extra })) };
+    // цвета услуг меняются в клетке графика, а в форме сохраняются у тех же услуг (svc0 — услуги дня до правки)
+    modal = { type: "request-form", id, days: daySlots(src).map((d) => ({ route: d.route || "", svc: svcToText(d.svc), svc0: d.svc, cost: baseCost(d) || "", color: d.color, extra: d.extra })) };
     const customersList = [...new Set([...db.requests.map((x) => x.customer), ...db.clients.map((k) => k.name)])].sort((a, b) => a.localeCompare(b, "ru"));
     const f = (name, label, value, attrs = "", cls = "") => `<div class="field ${cls}"><label>${label}</label><input class="input" name="${name}" value="${esc(value ?? "")}" ${attrs}></div>`;
     showModal(`
@@ -1129,6 +1146,14 @@
     return String(text || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
       const m = x.match(/^(\d{1,2}[:.]\d{2})\s*(.*)$/);
       return m ? { t: m[1].replace(".", ":").padStart(5, "0"), s: m[2] || null } : { t: null, s: x };
+    });
+  }
+  // услуга получает прежний цвет, если она была в дне с тем же временем и названием (или с тем же названием на том же месте)
+  function keepSvcColors(list, old) {
+    const pool = (old || []).map((s, i) => ({ ...s, i })).filter((s) => s.c != null);
+    return list.map((s, i) => {
+      const k = pool.findIndex((o) => o.t === s.t && o.s === s.s) + 1 || pool.findIndex((o) => o.i === i && o.s === s.s) + 1;
+      return k ? { ...s, c: pool.splice(k - 1, 1)[0].c } : s;
     });
   }
   const MAX_TOUR_DAYS = 366; // защита от опечатки в годе, а не ограничение длины тура
@@ -1183,7 +1208,7 @@
     if (diffDays(v("from"), v("to")) > MAX_TOUR_DAYS - 1) return bad("to", "Проверьте год: тур получается длиннее года");
     const n = diffDays(v("from"), v("to")) + 1;
     const days = modal.days.slice(0, n).map((x, i) => ({
-      n: i + 1, d: addDays(v("from"), i), route: x.route.trim() || null, svc: textToSvc(x.svc), cost: cents((+x.cost || 0) + extraSum(x)),
+      n: i + 1, d: addDays(v("from"), i), route: x.route.trim() || null, svc: keepSvcColors(textToSvc(x.svc), x.svc0), cost: cents((+x.cost || 0) + extraSum(x)),
       ...(x.color != null && { color: x.color }),
       ...(x.extra && x.extra.length && { extra: x.extra }),
     })).filter((d) => d.route || d.svc.length || d.cost || d.color != null || d.extra);
@@ -1238,7 +1263,10 @@
           <div class="form-grid" style="grid-template-columns:minmax(0,1fr) 120px">
             <div class="field"><label>Маршрут</label><input class="input" name="route" autocomplete="off" value="${esc(day.route || "")}" placeholder="Бух-Сам"></div>
             <div class="field"><label>Стоимость, $</label><input class="input num" name="cost" type="number" min="0" step="any" value="${baseCost(day) || ""}"></div>
-            <div class="field span4"><label>Услуги</label><input class="input" name="svc" autocomplete="off" value="${esc(svcToText(day.svc))}" placeholder="07:40 вс аэ, экя, ужин"></div>
+            <div class="field span4"><label>Услуги</label>
+              <div class="svc-list" id="cell-svc">${(day.svc && day.svc.length ? day.svc : [{}]).map((s) => svcRow(svcToText([s]), s.c ?? null)).join("")}</div>
+              <div><button class="btn sm" type="button" data-action="svc-add">${icon("plus")}Добавить услугу</button></div>
+            </div>
             <div class="field span4"><label>Доп. цены и комментарии</label>
               <div class="extra-list" id="cell-extra">${(day.extra || []).map(extraRow).join("")}</div>
               <div class="extra-f">
@@ -1254,7 +1282,7 @@
               <input type="hidden" name="color" value="${day.color ?? ""}">
             </div>
           </div>
-          <p class="small muted" style="margin:10px 0 0">Услуги через запятую, время — в начале. Доп. цены входят в итог дня. Стрелки вверху сохраняют день и переходят к соседнему.</p>
+          <p class="small muted" style="margin:10px 0 0">Услуга — время и название («07:40 вс аэ»). Квадрат слева — цвет услуги, например цвет машины, которая её выполняет; без него — как у дня. Доп. цены входят в итог дня. Стрелки вверху сохраняют день и переходят к соседнему.</p>
         </div>
         <div class="modal-f">
           <button class="btn ghost" type="button" data-action="cell-open" style="margin-right:auto">${kind === "req" ? "Карточка заявки" : "Карточка машины"}</button>
@@ -1266,6 +1294,25 @@
     updateCellTotal();
     setTimeout(() => { const i = $("#modal-layer [name=route]"); if (i) i.select(); }, 40);
   }
+  // строка услуги в окне дня: слева её цвет (пусто — как у дня), справа текст «07:40 вс аэ»
+  function svcRow(text = "", c = null) {
+    const tn = svcTint({ c });
+    return `<div class="svc-row" data-c="${c ?? ""}">
+      <button type="button" class="svc-c ${c == null ? "auto" : tn.cls}" ${tn.style} data-action="svc-pal" aria-label="Цвет услуги"
+        title="${c == null ? "Цвет как у дня — нажмите, чтобы выбрать свой" : "Цвет услуги — нажмите, чтобы изменить"}"></button>
+      <input class="input" name="sv" value="${esc(text)}" placeholder="07:40 вс аэ" autocomplete="off" aria-label="Услуга">
+      <button class="btn icon sm ghost" type="button" data-action="svc-del" aria-label="Убрать услугу" title="Убрать услугу">${icon("trash")}</button>
+    </div>`;
+  }
+  const svcPal = (c) => `<div class="svc-pal hue-pick">
+    <button type="button" class="auto ${c == null ? "on" : ""}" data-action="svc-color" data-c="">Как у дня</button>
+    ${pickList(c).map((h) => cellSw(h, c === h, undefined, "svc-color")).join("")}${cellSw("gray", c === "gray", "Серый", "svc-color")}${nocarBtn(`data-action="svc-color" data-c="${NOCAR}"`, c === NOCAR)}</div>`;
+  const rowColor = (c) => (c === "" ? null : c === "gray" ? "gray" : parseHue(c));
+  // услуги из строк окна: в строке можно перечислить несколько через запятую — все получат её цвет
+  const readSvc = (form) => $$(".svc-row", form).flatMap((row) => {
+    const c = rowColor(row.dataset.c);
+    return textToSvc($("[name=sv]", row).value).map((s) => (c == null ? s : { ...s, c }));
+  });
   // строка доп. цены в клетке: сумма в USD и комментарий
   const extraRow = (e = {}) => `<div class="extra-row">
     <input class="input num" name="xusd" type="number" step="any" value="${e.usd ?? ""}" placeholder="$" aria-label="Цена, $">
@@ -1285,7 +1332,7 @@
   function saveCell(form) {
     const { kind, id, d } = modal, x = cellOwner(kind, id), list = cellList(kind, x), el = form.elements;
     const extra = readExtra(form);
-    const val = { route: el.route.value.trim() || null, svc: textToSvc(el.svc.value), cost: cents((+el.cost.value || 0) + extraSum({ extra })) };
+    const val = { route: el.route.value.trim() || null, svc: readSvc(form), cost: cents((+el.cost.value || 0) + extraSum({ extra })) };
     const c = el.color.value, color = c === "" ? null : c === "gray" ? "gray" : parseHue(c);
     const i = list.findIndex((y) => y.d === d), old = list[i];
     const oldColor = (old && old.color) ?? null;
@@ -1409,8 +1456,8 @@
     return f.y === l.y ? `${MONTHS[f.m - 1]} – ${MONTHS[l.m - 1].toLowerCase()} ${f.y}` : `${MONTHS[f.m - 1]} ${f.y} – ${MONTHS[l.m - 1].toLowerCase()} ${l.y}`;
   }
   // клетка ленты: маршрут, услуги со временем, внизу — цена за день
-  const dayCell = (route, svc, cost, extra) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) =>
-    `<span class="sl">${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`).join("")}${(extra || []).map((e) =>
+  const dayCell = (route, svc, cost, extra) => `${route ? `<b>${esc(route)}</b>` : ""}${(svc || []).map((x) => { const tn = svcTint(x);
+    return `<span class="sl ${tn.cls}" ${tn.style}>${x.t ? `<i>${esc(x.t)}</i>` : ""}${esc(x.s || "")}</span>`; }).join("")}${(extra || []).map((e) =>
     `<span class="sl nt">${esc(extraLabel(e))}</span>`).join("")}${cost ? `<span class="pr">${fmtUsd(cost)}</span>` : ""}`;
   // ширины колонок заданы заранее (table-layout: fixed), чтобы не зависели от текста и загрузки шрифта
   function ribbonHead(rg, label) {
@@ -2679,8 +2726,8 @@
       }
       case "cell-clear": {
         const f = $("form[data-form=cell]");
-        for (const n of ["route", "svc", "cost", "color"]) f.elements[n].value = "";
-        $$(".extra-row", f).forEach((row) => row.remove());
+        for (const n of ["route", "cost", "color"]) f.elements[n].value = "";
+        $$(".extra-row, .svc-row", f).forEach((row) => row.remove());
         saveCell(f);
         closeModal();
         break;
@@ -2689,6 +2736,24 @@
         const f = a.closest("form");
         f.elements.color.value = a.dataset.c;
         $$(".cell-colors button", f).forEach((b) => b.classList.toggle("on", b === a));
+        break;
+      }
+      case "svc-add": {
+        $("#cell-svc").insertAdjacentHTML("beforeend", svcRow());
+        $("#cell-svc .svc-row:last-child [name=sv]").focus();
+        break;
+      }
+      case "svc-del": a.closest(".svc-row").remove(); break;
+      case "svc-pal": {
+        // выбор цвета услуги раскрывается под её строкой; повторное нажатие — закрывает
+        const row = a.closest(".svc-row"), open = $(".svc-pal", row);
+        $$("#cell-svc .svc-pal").forEach((x) => x.remove());
+        if (!open) row.insertAdjacentHTML("beforeend", svcPal(rowColor(row.dataset.c)));
+        break;
+      }
+      case "svc-color": {
+        const row = a.closest(".svc-row");
+        row.outerHTML = svcRow($("[name=sv]", row).value, rowColor(a.dataset.c));
         break;
       }
       case "cell-extra-add": {
